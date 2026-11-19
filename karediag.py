@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import sys
 import re
@@ -395,9 +394,17 @@ def audit_failed_services():
 
 def audit_firewall():
     if shutil.which("ufw"):
+        ok, out, _ = audit_run_cmd(
+            prefixe_privilege() + ["env", "LC_ALL=C", "ufw", "status"]
+        )
+        if ok and "Status:" in out:
+            return {"installed": True, "active": "Status: active" in out, "name": "ufw"}
         actif, _, _ = audit_run_cmd(["systemctl", "is-active", "ufw"])
         return {"installed": True, "active": actif, "name": "ufw"}
     if shutil.which("firewall-cmd"):
+        ok, out, _ = audit_run_cmd(prefixe_privilege() + ["firewall-cmd", "--state"])
+        if ok and out.strip():
+            return {"installed": True, "active": out.strip() == "running", "name": "firewalld"}
         actif, _, _ = audit_run_cmd(["systemctl", "is-active", "firewalld"])
         return {"installed": True, "active": actif, "name": "firewalld"}
     return {"installed": False, "active": False, "name": None}
@@ -525,14 +532,16 @@ def audit_analyser(hw, sw):
     return {"score": score, "recommendations": recs}
 
 
-def audit_sauver_historique(score, nb_critiques, nb_avertissements):
+def audit_sauver_historique(score, nb_critiques, nb_avertissements, fichier=None):
     os.makedirs(HISTORY_DIR, exist_ok=True)
     hist = audit_charger_historique()
     hist.append({"date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                 "score": score, "critiques": nb_critiques, "avertissements": nb_avertissements})
+                 "score": score, "critiques": nb_critiques,
+                 "avertissements": nb_avertissements, "fichier": fichier})
     hist = hist[-50:]
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(hist, f, indent=2, ensure_ascii=False)
+    audit_nettoyer_rapports()
 
 
 def audit_charger_historique():
@@ -541,6 +550,58 @@ def audit_charger_historique():
             return json.load(f)
     except Exception:
         return []
+
+
+# ============================================================
+# KareDiag - Zone 10 : comparaison de rapports d'audit
+# ============================================================
+AUDITS_DIR = os.path.join(HISTORY_DIR, "audits")
+
+
+def audit_sauver_rapport_complet(resultat):
+    """Archive le rapport d'audit complet (recommandations incluses).
+
+    Alimente la comparaison avant/après de la Zone 10.
+    Renvoie le chemin du fichier JSON créé."""
+    os.makedirs(AUDITS_DIR, exist_ok=True)
+    chemin = os.path.join(
+        AUDITS_DIR,
+        f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    with open(chemin, "w", encoding="utf-8") as f:
+        json.dump(resultat, f, indent=2, ensure_ascii=False)
+    return chemin
+
+
+def audit_charger_rapport(chemin):
+    """Charge un rapport d'audit complet ; None si absent ou illisible."""
+    if not chemin or not os.path.isfile(chemin):
+        return None
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def audit_nettoyer_rapports():
+    """Supprime les rapports complets orphelins (absents de l'historique)."""
+    try:
+        gardes = {e.get("fichier") for e in audit_charger_historique()}
+        for chemin in glob.glob(os.path.join(AUDITS_DIR, "audit_*.json")):
+            if chemin not in gardes:
+                os.remove(chemin)
+    except Exception:
+        pass
+
+
+def couleur_score_audit(score):
+    """Couleur standardisée de l'affichage du score /100."""
+    if score >= 80:
+        return "#98c379"
+    if score >= 50:
+        return "#e5c07b"
+    return "#e06c75"
 
 
 # ============================================================
@@ -838,7 +899,9 @@ class KAuditWindow(QDialog):
             nb_critiques = sum(1 for r in resultat["recommendations"] if r["level"] == "critical")
             nb_avertissements = sum(1 for r in resultat["recommendations"] if r["level"] == "warning")
             try:
-                audit_sauver_historique(resultat["score"], nb_critiques, nb_avertissements)
+                chemin_rapport = audit_sauver_rapport_complet(resultat)
+                audit_sauver_historique(resultat["score"], nb_critiques,
+                                        nb_avertissements, chemin_rapport)
             except Exception:
                 pass
 
@@ -1033,6 +1096,967 @@ class KAuditWindow(QDialog):
             )
         except Exception as e:
             QMessageBox.critical(self, "Erreur", f"Erreur lors de l'export HTML :\n{e}")
+
+
+class KAuditCompareWindow(QDialog):
+    """Zone 10 : comparaison de deux rapports d'audit (avant / après).
+
+    Évolution du score /100, tendance des derniers audits et diff des
+    recommandations (résolues / apparues / persistantes), export HTML."""
+
+    STATUTS = {
+        "resolue": ("🟢 RÉSOLUE",),
+        "apparue": ("🔴 APPARUE",),
+        "persistante": ("🟡 PERSISTANTE",),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Comparaison de rapports d'audit (Zone 10)")
+        self.resize(920, 780)
+        self.setMinimumSize(820, 660)
+        self.audits = []
+        self.resultat_compare = None
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4; font-weight: bold; font-size: 13px;
+                border: 2px solid #3e4451; border-radius: 8px;
+                margin-top: 12px; background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
+            QPushButton {
+                background-color: #2188ff; color: white; border-radius: 4px;
+                padding: 6px 12px; font-weight: bold; border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel { color: #abb2bf; font-size: 12px; }
+            QComboBox, QLineEdit {
+                background-color: #21252b; border: 1px solid #4b5263;
+                border-radius: 4px; padding: 4px; color: #abb2bf;
+            }
+            QTableWidget {
+                background-color: #121417; color: #abb2bf;
+                border: 1px solid #3e4451; border-radius: 4px;
+                gridline-color: #3e4451;
+            }
+            QHeaderView::section {
+                background-color: #21252b; color: #00bcd4;
+                border: none; padding: 4px; font-weight: bold;
+            }
+            QTextEdit {
+                background-color: #121417; color: #00ff00;
+                font-family: monospace; font-size: 10px;
+                border: 1px solid #3e4451; border-radius: 4px;
+            }
+            QProgressBar {
+                background-color: #21252b; border: 1px solid #3e4451;
+                border-radius: 6px; color: #abb2bf; text-align: center;
+                font-weight: bold; min-height: 22px;
+            }
+            QProgressBar::chunk { border-radius: 5px; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("Zone 10 - Comparaison de rapports d'audit")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Compare deux audits enregistrés par la Zone 9 : évolution du score et diff des recommandations.\n"
+            "Lancez au moins deux audits dans la Zone 9 pour pouvoir les comparer."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        groupe_choix = QGroupBox(" Audits à comparer ")
+        grille = QGridLayout(groupe_choix)
+
+        self.combo_avant = QComboBox()
+        self.combo_avant.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_apres = QComboBox()
+        self.combo_apres.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_comparer = QPushButton("🔎 Comparer")
+        self.btn_comparer.clicked.connect(self.comparer)
+        self.btn_export_html = QPushButton("🌐 Exporter la comparaison (HTML)")
+        self.btn_export_html.setEnabled(False)
+        self.btn_export_html.clicked.connect(self.exporter_comparaison)
+
+        grille.addWidget(QLabel("Audit A (avant) :"), 0, 0)
+        grille.addWidget(self.combo_avant, 0, 1)
+        grille.addWidget(QLabel("Audit B (après) :"), 1, 0)
+        grille.addWidget(self.combo_apres, 1, 1)
+        grille.addWidget(self.btn_comparer, 0, 2)
+        grille.addWidget(self.btn_export_html, 1, 2)
+        layout.addWidget(groupe_choix)
+
+        groupe_score = QGroupBox(" Évolution du score ")
+        lay_score = QGridLayout(groupe_score)
+
+        self.lbl_titre_a = QLabel("Audit A — (non sélectionné)")
+        self.lbl_titre_a.setStyleSheet("font-weight: bold; color: #00bcd4;")
+        self.lbl_titre_b = QLabel("Audit B — (non sélectionné)")
+        self.lbl_titre_b.setStyleSheet("font-weight: bold; color: #00bcd4;")
+        self.lbl_score_a = QLabel("—")
+        self.lbl_score_a.setAlignment(Qt.AlignCenter)
+        self.lbl_score_a.setStyleSheet("font-size: 34px; font-weight: bold; color: #606b7d;")
+        self.lbl_score_b = QLabel("—")
+        self.lbl_score_b.setAlignment(Qt.AlignCenter)
+        self.lbl_score_b.setStyleSheet("font-size: 34px; font-weight: bold; color: #606b7d;")
+        self.barre_a = QProgressBar()
+        self.barre_a.setRange(0, 100)
+        self.barre_a.setFormat("%v / 100")
+        self.barre_b = QProgressBar()
+        self.barre_b.setRange(0, 100)
+        self.barre_b.setFormat("%v / 100")
+        fleche = QLabel("▶")
+        fleche.setAlignment(Qt.AlignCenter)
+        fleche.setStyleSheet("font-size: 18px; color: #abb2bf;")
+        self.lbl_delta = QLabel("")
+        self.lbl_delta.setAlignment(Qt.AlignCenter)
+
+        lay_score.addWidget(self.lbl_titre_a, 0, 0)
+        lay_score.addWidget(self.lbl_score_a, 1, 0)
+        lay_score.addWidget(self.barre_a, 2, 0)
+        lay_score.addWidget(fleche, 1, 1)
+        lay_score.addWidget(self.lbl_titre_b, 0, 2)
+        lay_score.addWidget(self.lbl_score_b, 1, 2)
+        lay_score.addWidget(self.barre_b, 2, 2)
+        lay_score.addWidget(self.lbl_delta, 1, 3)
+        layout.addWidget(groupe_score)
+
+        groupe_tendance = QGroupBox(" Tendance des scores (du plus ancien au plus récent) ")
+        lay_tendance = QVBoxLayout(groupe_tendance)
+        self.txt_tendance = QTextEdit()
+        self.txt_tendance.setReadOnly(True)
+        self.txt_tendance.setMinimumHeight(70)
+        lay_tendance.addWidget(self.txt_tendance)
+        layout.addWidget(groupe_tendance)
+
+        groupe_diff = QGroupBox(" Recommandations : diff A → B ")
+        lay_diff = QVBoxLayout(groupe_diff)
+        self.table_diff = QTableWidget(0, 4)
+        self.table_diff.setHorizontalHeaderLabels(["Statut", "Niveau", "Constat", "Action recommandée"])
+        self.table_diff.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table_diff.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table_diff.setColumnWidth(0, 150)
+        self.table_diff.setColumnWidth(1, 90)
+        self.table_diff.verticalHeader().setVisible(False)
+        self.table_diff.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_diff.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_diff.setWordWrap(True)
+        self.table_diff.setAlternatingRowColors(True)
+        lay_diff.addWidget(self.table_diff)
+        layout.addWidget(groupe_diff, stretch=1)
+
+        self.lbl_etat = QLabel("")
+        self.lbl_etat.setStyleSheet("color: #e5c07b; font-style: italic;")
+        self.lbl_etat.setWordWrap(True)
+        layout.addWidget(self.lbl_etat)
+
+        self.charger_audits()
+
+    def charger_audits(self):
+        self.audits = []
+        for e in audit_charger_historique():
+            if isinstance(e, dict) and e.get("date"):
+                self.audits.append(e)
+        try:
+            self.audits.sort(key=lambda e: e.get("date", ""))
+        except Exception:
+            pass
+
+        self.combo_avant.clear()
+        self.combo_apres.clear()
+        for i, e in enumerate(self.audits):
+            texte = f"{e['date']} — Score {e.get('score', '?')}/100"
+            self.combo_avant.addItem(texte, i)
+            self.combo_apres.addItem(texte, i)
+        if len(self.audits) >= 2:
+            self.combo_avant.setCurrentIndex(0)
+            self.combo_apres.setCurrentIndex(len(self.audits) - 1)
+        elif len(self.audits) == 1:
+            self.combo_avant.setCurrentIndex(0)
+            self.combo_apres.setCurrentIndex(0)
+            self.lbl_etat.setText("Un seul audit enregistré — la comparaison A/B nécessite au moins deux audits.")
+        else:
+            self.lbl_etat.setText("Aucun audit enregistré — lancez un premier audit dans la Zone 9.")
+        self.generer_tendance()
+
+    def generer_tendance(self):
+        if not self.audits:
+            self.txt_tendance.setPlainText("(aucun audit enregistré)")
+            return
+        blocs = "▁▂▃▄▅▆▇█"
+        morceaux = []
+        for e in self.audits:
+            try:
+                score = int(e.get("score", 0) or 0)
+            except Exception:
+                score = 0
+            score = max(0, min(100, score))
+            morceaux.append(blocs[score * (len(blocs) - 1) // 100])
+        dates = [e.get("date", "?") for e in self.audits]
+        scores = []
+        for e in self.audits:
+            try:
+                scores.append(int(e.get("score", 0) or 0))
+            except Exception:
+                pass
+        lignes = [
+            "Evolution : " + " ".join(morceaux),
+            f"Période   : {dates[0]} → {dates[-1]}",
+            f"Scores    : minimum {min(scores)} — maximum {max(scores)} — actuel {scores[-1]}",
+        ]
+        self.txt_tendance.setPlainText("\n".join(lignes))
+
+    def comparer(self):
+        idx_a = self.combo_avant.currentData()
+        idx_b = self.combo_apres.currentData()
+        if idx_a is None or idx_b is None or not self.audits:
+            QMessageBox.information(
+                self, "Comparaison impossible",
+                "Aucun audit à comparer.\nLancez d'abord des audits dans la Zone 9."
+            )
+            return
+        avant = self.audits[idx_a]
+        apres = self.audits[idx_b]
+
+        try:
+            score_a = int(avant.get("score", 0) or 0)
+        except Exception:
+            score_a = 0
+        try:
+            score_b = int(apres.get("score", 0) or 0)
+        except Exception:
+            score_b = 0
+        delta = score_b - score_a
+
+        couleur_a = couleur_score_audit(score_a)
+        couleur_b = couleur_score_audit(score_b)
+        self.lbl_titre_a.setText(f"Audit A — {avant.get('date', '?')}")
+        self.lbl_titre_b.setText(f"Audit B — {apres.get('date', '?')}")
+        self.lbl_score_a.setText(str(score_a))
+        self.lbl_score_a.setStyleSheet(f"font-size: 34px; font-weight: bold; color: {couleur_a};")
+        self.lbl_score_b.setText(str(score_b))
+        self.lbl_score_b.setStyleSheet(f"font-size: 34px; font-weight: bold; color: {couleur_b};")
+        self.barre_a.setValue(score_a)
+        self.barre_a.setStyleSheet(
+            f"QProgressBar::chunk {{ background-color: {couleur_a}; border-radius: 5px; }}"
+        )
+        self.barre_b.setValue(score_b)
+        self.barre_b.setStyleSheet(
+            f"QProgressBar::chunk {{ background-color: {couleur_b}; border-radius: 5px; }}"
+        )
+        if delta > 0:
+            self.lbl_delta.setText(f"▲\n▲ +{delta} pts")
+            self.lbl_delta.setStyleSheet("font-weight: bold; color: #98c379; font-size: 13px;")
+        elif delta < 0:
+            self.lbl_delta.setText(f"▼\n▼ {delta} pts")
+            self.lbl_delta.setStyleSheet("font-weight: bold; color: #e06c75; font-size: 13px;")
+        else:
+            self.lbl_delta.setText("=\n= 0 pt")
+            self.lbl_delta.setStyleSheet("font-weight: bold; color: #606b7d; font-size: 13px;")
+
+        rapport_avant = audit_charger_rapport(avant.get("fichier"))
+        rapport_apres = audit_charger_rapport(apres.get("fichier"))
+
+        def cle(rec):
+            return (rec.get("category", ""), rec.get("title", ""))
+
+        lignes_diff = []
+        detail_disponible = rapport_avant is not None and rapport_apres is not None
+        if detail_disponible:
+            recs_avant = {cle(r): r for r in rapport_avant.get("recommendations", [])}
+            recs_apres = {cle(r): r for r in rapport_apres.get("recommendations", [])}
+            for k in recs_apres:
+                if k not in recs_avant:
+                    lignes_diff.append({"statut": "apparue", "rec": recs_apres[k]})
+            for k in recs_avant:
+                if k not in recs_apres:
+                    lignes_diff.append({"statut": "resolue", "rec": recs_avant[k]})
+                else:
+                    lignes_diff.append({"statut": "persistante", "rec": recs_apres[k]})
+            ordre = {"resolue": 0, "apparue": 1, "persistante": 2}
+            lignes_diff.sort(key=lambda d: (ordre[d["statut"]], d["rec"]["category"], d["rec"]["title"]))
+            self.lbl_etat.setText("")
+        else:
+            self.lbl_etat.setText(
+                "Diff détaillé indisponible : au moins un des deux audits date d'une version antérieure\n"
+                "à l'archivage complet. Seuls le score et la tendance sont comparés.\n"
+                "Relancez un audit (Zone 9) avec cette version pour obtenir le diff complet."
+            )
+
+        self.table_diff.setRowCount(0)
+        for item in lignes_diff:
+            libelle = self.STATUTS[item["statut"]][0]
+            rec = item["rec"]
+            ligne = self.table_diff.rowCount()
+            self.table_diff.insertRow(ligne)
+            self.table_diff.setItem(ligne, 0, QTableWidgetItem(libelle))
+            self.table_diff.setItem(ligne, 1, QTableWidgetItem(rec.get("level", "")))
+            self.table_diff.setItem(ligne, 2, QTableWidgetItem(rec.get("title", "")))
+            self.table_diff.setItem(ligne, 3, QTableWidgetItem(rec.get("action", "")))
+        self.table_diff.resizeRowsToContents()
+
+        self.resultat_compare = {
+            "avant": avant,
+            "apres": apres,
+            "delta": delta,
+            "detail_disponible": detail_disponible,
+            "lignes_diff": lignes_diff,
+        }
+        self.btn_export_html.setEnabled(True)
+
+    def exporter_comparaison(self):
+        if not self.resultat_compare:
+            return
+        try:
+            d = self.resultat_compare
+            avant = d["avant"]
+            apres = d["apres"]
+            score_a = avant.get("score", 0)
+            score_b = apres.get("score", 0)
+            delta = d["delta"]
+            couleur_delta = ("#98c379" if delta > 0 else "#e06c75" if delta < 0 else "#606b7d")
+
+            def table_statut(statut, motif, couleur):
+                items = [x for x in d["lignes_diff"] if x["statut"] == statut]
+                if not items:
+                    return (f'<tr><td colspan="4" style="color:#606b7d;text-align:center;">'
+                            f"Aucune recommandation pour ce statut</td></tr>")
+                html = ""
+                for x in items:
+                    rec = x["rec"]
+                    html += f"""
+                <tr>
+                  <td style="color:{couleur};white-space:nowrap;"><b>{motif}</b></td>
+                  <td>{rec['category']}</td>
+                  <td><b>{rec['title']}</b><br/>{rec['description']}</td>
+                  <td>{rec['action']}</td>
+                </tr>"""
+                return html
+
+            motif_resolue, couleur_resolue = "🟢 RÉSOLUE", "#98c379"
+            motif_apparue, couleur_apparue = "🔴 APPARUE", "#e06c75"
+            motif_persistante, couleur_persistante = "🟡 PERSISTANTE", "#e5c07b"
+            html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<title>Comparaison d'audits KareDiag</title>
+<style>
+  body {{ background-color:#181a1f; color:#abb2bf; font-family:sans-serif; margin:2em; }}
+  h1, h2 {{ color:#00bcd4; }}
+  .delta {{ font-size:2.2em; font-weight:bold; color:{couleur_delta}; }}
+  table {{ border-collapse:collapse; width:100%; margin-top:1em; }}
+  th, td {{ border:1px solid #3e4451; padding:6px 10px; text-align:left; vertical-align:top; }}
+  th {{ background-color:#21252b; color:#00bcd4; }}
+  .meta {{ color:#606b7d; font-size:0.9em; }}
+</style>
+</head>
+<body>
+<h1>Comparaison d'audits KareDiag</h1>
+<p class="meta">Éditée le {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+<p>
+  Audit A : {avant.get('date', '?')} — score <b>{score_a}/100</b><br/>
+  Audit B : {apres.get('date', '?')} — score <b>{score_b}/100</b><br/>
+  Évolution : <span class="delta">{'+' if delta > 0 else ''}{delta} points</span>
+</p>
+<h2>Recommandations</h2>
+<table>
+  <tr><th>Statut</th><th>Catégorie</th><th>Constat</th><th>Action</th></tr>
+{table_statut('resolue', motif_resolue, couleur_resolue)}
+{table_statut('apparue', motif_apparue, couleur_apparue)}
+{table_statut('persistante', motif_persistante, couleur_persistante)}
+</table>
+</body>
+</html>"""
+            chemin = os.path.join(
+                bureau_utilisateur(),
+                f"karediag_comparaison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+            )
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write(html)
+            QMessageBox.information(
+                self, "Comparaison exportée",
+                f"Le rapport HTML a été enregistré ici :\n{chemin}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", f"Erreur lors de l'export de la comparaison :\n{e}")
+
+
+class KOutilsDisquesWindow(QDialog):
+    """Zone 5 avancée : fsck, test de surface, TRIM et attributs NVMe.
+
+    Vérification = lecture seule. Réparation = partition démontée +
+    confirmation explicite. Aucun mode destructeur (badblocks -w,
+    btrfs check --repair) n'est exposé.
+    """
+
+    FS_OUTILS = {
+        "ext2": ("e2fsck", ["-fn"], ["-fy"]),
+        "ext3": ("e2fsck", ["-fn"], ["-fy"]),
+        "ext4": ("e2fsck", ["-fn"], ["-fy"]),
+        "xfs": ("xfs_repair", ["-n"], []),
+        "vfat": ("fsck.vfat", ["-n"], ["-a"]),
+        "fat32": ("fsck.vfat", ["-n"], ["-a"]),
+        "msdos": ("fsck.vfat", ["-n"], ["-a"]),
+        "ntfs": ("ntfsfix", ["-n"], ["-d"]),
+    }
+
+    def __init__(self, parent=None, disque_courant=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Outils disques avancés (Zone 5)")
+        self.resize(860, 760)
+        self.setMinimumSize(780, 660)
+        self.process = None
+        self.disque_courant = disque_courant
+        self.fin_callback = None
+        self.sortie = ""
+        self.t0 = datetime.now()
+        self.duree_op = 0
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4; font-weight: bold; font-size: 13px;
+                border: 2px solid #3e4451; border-radius: 8px;
+                margin-top: 12px; background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
+            QPushButton {
+                background-color: #2188ff; color: white; border-radius: 4px;
+                padding: 6px 12px; font-weight: bold; border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel { color: #abb2bf; font-size: 12px; }
+            QComboBox {
+                background-color: #21252b; border: 1px solid #4b5263;
+                border-radius: 4px; padding: 4px; color: #abb2bf;
+            }
+            QTextEdit {
+                background-color: #1e1e1e; color: #00ff00;
+                font-family: monospace; font-size: 10px;
+                border: 1px solid #3e4451; border-radius: 4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("Zone 5 avancée - Outils disques (fsck / surface / SSD-NVMe)")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Vérification et réparation des systèmes de fichiers, test de surface, TRIM, attributs NVMe.\n"
+            "Vérification = lecture seule. Réparation = partition démontée + confirmation obligatoire."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        groupe_cible = QGroupBox(" Cible ")
+        row_cible = QHBoxLayout()
+        row_cible.addWidget(QLabel("Disque / partition :"))
+        self.combo_cible = QComboBox()
+        self.combo_cible.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_rafraichir = QPushButton("Rafraîchir")
+        self.btn_rafraichir.clicked.connect(self.charger_cibles)
+        row_cible.addWidget(self.combo_cible, stretch=1)
+        row_cible.addWidget(self.btn_rafraichir)
+        groupe_cible.setLayout(row_cible)
+        layout.addWidget(groupe_cible)
+
+        self.lbl_etat_cible = QLabel("Analyse en cours...")
+        self.lbl_etat_cible.setWordWrap(True)
+        layout.addWidget(self.lbl_etat_cible)
+
+        groupe_fs = QGroupBox(" Systèmes de fichiers ")
+        lay_fs = QVBoxLayout(groupe_fs)
+        row_fs = QHBoxLayout()
+        self.btn_demonter = QPushButton("Démonter la cible")
+        self.btn_demonter.clicked.connect(self.demonter_cible)
+        self.btn_verifier_fs = QPushButton("Vérifier (lecture seule)")
+        self.btn_verifier_fs.clicked.connect(self.verifier_fs)
+        self.btn_reparer_fs = QPushButton("Réparer (confirmation)")
+        self.btn_reparer_fs.clicked.connect(self.reparer_fs)
+        row_fs.addWidget(self.btn_demonter)
+        row_fs.addWidget(self.btn_verifier_fs)
+        row_fs.addWidget(self.btn_reparer_fs)
+        lay_fs.addLayout(row_fs)
+        self.lbl_fs_info = QLabel(
+            "ext2/3/4 : e2fsck — xfs : xfs_repair — vfat : fsck.vfat — ntfs : ntfsfix — btrfs : scrub (monté)."
+        )
+        self.lbl_fs_info.setStyleSheet("color: #606b7d; font-style: italic;")
+        self.lbl_fs_info.setWordWrap(True)
+        lay_fs.addWidget(self.lbl_fs_info)
+        layout.addWidget(groupe_fs)
+
+        groupe_surface = QGroupBox(" Test de surface ")
+        lay_surface = QVBoxLayout(groupe_surface)
+        row_surface = QHBoxLayout()
+        self.btn_debit = QPushButton("⏱️ Débit lecture (~10 s)")
+        self.btn_debit.clicked.connect(self.lancer_debit)
+        self.btn_badblocks = QPushButton("🧱 badblocks complet (heures)")
+        self.btn_badblocks.clicked.connect(self.lancer_badblocks)
+        row_surface.addWidget(self.btn_debit)
+        row_surface.addWidget(self.btn_badblocks)
+        lay_surface.addLayout(row_surface)
+        lbl_surface = QLabel(
+            "Les deux tests sont en LECTURE SEULE : aucune écriture sur vos données.\n"
+            "Le débit moyen anormal (comparé aux autres disques) révèle des secteurs lents."
+        )
+        lbl_surface.setStyleSheet("color: #606b7d; font-style: italic;")
+        lbl_surface.setWordWrap(True)
+        lay_surface.addWidget(lbl_surface)
+        layout.addWidget(groupe_surface)
+
+        groupe_ssd = QGroupBox(" SSD / NVMe ")
+        lay_ssd = QVBoxLayout(groupe_ssd)
+        row_ssd = QHBoxLayout()
+        self.btn_trim = QPushButton("✨ fstrim (partitions montées)")
+        self.btn_trim.clicked.connect(self.lancer_trim)
+        self.btn_nvme = QPushButton("🧠 Attributs NVMe (usure, température)")
+        self.btn_nvme.clicked.connect(self.lancer_nvme)
+        row_ssd.addWidget(self.btn_trim)
+        row_ssd.addWidget(self.btn_nvme)
+        lay_ssd.addLayout(row_ssd)
+        self.lbl_trim_timer = QLabel("TRIM périodique : vérification...")
+        self.lbl_trim_timer.setWordWrap(True)
+        lay_ssd.addWidget(self.lbl_trim_timer)
+        layout.addWidget(groupe_ssd)
+
+        row_btns = QHBoxLayout()
+        self.btn_arreter = QPushButton("Arrêter l'opération en cours")
+        self.btn_arreter.setEnabled(False)
+        self.btn_arreter.clicked.connect(self.arreter)
+        row_btns.addWidget(self.btn_arreter)
+        layout.addLayout(row_btns)
+
+        groupe_log = QGroupBox(" Journal des opérations ")
+        log_layout = QVBoxLayout(groupe_log)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("""
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 10px;
+            border: 1px solid #3e4451;
+            border-radius: 4px;
+        """)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(groupe_log, stretch=1)
+
+        self.charger_cibles()
+        self.maj_trim_timer()
+
+    def log(self, message):
+        self.log_text.append(message)
+
+    def charger_cibles(self):
+        avant = self.combo_cible.currentData() or self.disque_courant
+        self.combo_cible.clear()
+        for b in lister_blocs():
+            self.combo_cible.addItem(b["affichage"], b["nom"])
+        if avant:
+            idx = self.combo_cible.findData(avant)
+            if idx >= 0:
+                self.combo_cible.setCurrentIndex(idx)
+        self.maj_etat_cible()
+
+    def cible_courante(self):
+        return self.combo_cible.currentData()
+
+    def exiger_cible(self):
+        cible = self.cible_courante()
+        if not cible:
+            QMessageBox.warning(
+                self, "Cible invalide", "Sélectionnez un disque ou une partition."
+            )
+        return cible
+
+    def fstype_cible(self, cible):
+        try:
+            res = subprocess.run(
+                ["lsblk", "-rno", "FSTYPE", cible], capture_output=True, text=True
+            )
+            for ligne in res.stdout.splitlines():
+                ligne = ligne.strip()
+                if ligne:
+                    return ligne
+        except Exception:
+            pass
+        return None
+
+    def point_montage(self, cible):
+        try:
+            res = subprocess.run(
+                ["lsblk", "-rno", "MOUNTPOINT", cible], capture_output=True, text=True
+            )
+            for ligne in res.stdout.splitlines():
+                ligne = ligne.strip()
+                if ligne:
+                    return ligne
+        except Exception:
+            pass
+        return None
+
+    def maj_etat_cible(self):
+        cible = self.cible_courante()
+        if not cible:
+            self.lbl_etat_cible.setText("Aucune cible détectée — cliquez sur Rafraîchir.")
+            self.lbl_etat_cible.setStyleSheet("font-weight: bold; color: #e5c07b;")
+            return
+        fstype = self.fstype_cible(cible)
+        mp = self.point_montage(cible)
+        morceaux = [cible, "système de fichiers : " + (fstype or "inconnu")]
+        if mp:
+            morceaux.append("montée sur " + mp + (" (SYSTÈME ACTIF)" if mp == "/" else ""))
+        else:
+            morceaux.append("démontée ✅")
+        self.lbl_etat_cible.setText("Cible : " + " — ".join(morceaux))
+        if mp == "/":
+            self.lbl_etat_cible.setStyleSheet("font-weight: bold; color: #e06c75;")
+        elif mp:
+            self.lbl_etat_cible.setStyleSheet("font-weight: bold; color: #e5c07b;")
+        else:
+            self.lbl_etat_cible.setStyleSheet("font-weight: bold; color: #98c379;")
+
+    def maj_trim_timer(self):
+        try:
+            actif = subprocess.run(
+                ["systemctl", "is-enabled", "fstrim.timer"],
+                capture_output=True, text=True
+            ).returncode == 0
+        except Exception:
+            actif = False
+        if actif:
+            self.lbl_trim_timer.setText("TRIM périodique (fstrim.timer) : ✅ activé")
+        else:
+            self.lbl_trim_timer.setText(
+                "TRIM périodique (fstrim.timer) : ❌ désactivé\n"
+                "sudo systemctl enable --now fstrim.timer"
+            )
+
+    def demonter_cible(self):
+        cible = self.cible_courante()
+        if not cible:
+            return False
+        fstype = self.fstype_cible(cible)
+        if fstype == "swap":
+            r = subprocess.run(
+                prefixe_privilege() + ["swapoff", cible], capture_output=True, text=True
+            )
+            if r.returncode == 0:
+                self.log("Swap désactivé sur " + cible)
+            else:
+                self.log("swapoff a échoué : " + (r.stderr.strip() or "erreur inconnue"))
+        else:
+            erreurs = demonter_chemin(cible, log_fn=self.log)
+            if erreurs:
+                QMessageBox.critical(
+                    self, "Démontage impossible",
+                    "Impossible de démonter la cible :\n" + "\n".join(erreurs)
+                )
+                return False
+        if self.point_montage(cible):
+            self.maj_etat_cible()
+            QMessageBox.critical(
+                self, "Démontage impossible", "La cible est encore montée."
+            )
+            return False
+        self.maj_etat_cible()
+        return True
+
+    def verifier_fs(self):
+        cible = self.exiger_cible()
+        if not cible:
+            return
+        mp = self.point_montage(cible)
+        if mp == "/":
+            QMessageBox.critical(
+                self, "Opération interdite",
+                "La cible contient le système actif.\n"
+                "Un fsck sur une racine montée est refusé."
+            )
+            return
+        fstype = self.fstype_cible(cible)
+        if fstype == "btrfs":
+            if not mp:
+                QMessageBox.warning(
+                    self, "btrfs non montée",
+                    "La vérification btrfs (scrub) s'exécute sur un système MONTÉ.\n"
+                    "Montez la partition puis relancez la vérification."
+                )
+                return
+            args = prefixe_privilege() + ["btrfs", "scrub", "start", "-B", mp]
+        elif fstype in self.FS_OUTILS:
+            outil, args_verif, _ = self.FS_OUTILS[fstype]
+            if not shutil.which(outil):
+                QMessageBox.critical(
+                    self, "Outil manquant",
+                    f"{outil} est introuvable sur ce système.\n"
+                    "Installez le paquet requis :\n\n"
+                    "sudo apt install e2fsprogs  (ou xfsprogs, dosfstools, ntfs-3g)"
+                )
+                return
+            if mp:
+                reponse = QMessageBox.question(
+                    self, "Partition montée",
+                    f"{cible} est montée sur {mp}.\n"
+                    "La vérification doit se faire à froid.\n\n"
+                    "La démonter maintenant ?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if reponse != QMessageBox.Yes or not self.demonter_cible():
+                    return
+            args = prefixe_privilege() + [outil] + args_verif + [cible]
+        else:
+            QMessageBox.warning(
+                self, "Type non géré",
+                f"Type « {fstype or 'inconnu'} » non géré par l'assistant fsck."
+            )
+            return
+        self.lancer_process(args, "Vérification fs (lecture seule)")
+
+    def reparer_fs(self):
+        cible = self.exiger_cible()
+        if not cible:
+            return
+        fstype = self.fstype_cible(cible)
+        if fstype == "btrfs":
+            QMessageBox.warning(
+                self, "Réparation btrfs",
+                "La réparation manuelle btrfs (check --repair) est jugée trop\n"
+                "dangereuse pour être proposée ici : utilisez scrub (monté),\n"
+                "ou effectuez d'abord une image de secours via la Zone 4."
+            )
+            return
+        if fstype not in self.FS_OUTILS:
+            QMessageBox.warning(
+                self, "Type non géré",
+                f"Type « {fstype or 'inconnu'} » non géré : pas de réparation automatique."
+            )
+            return
+        outil, _, args_rep = self.FS_OUTILS[fstype]
+        if not shutil.which(outil):
+            QMessageBox.critical(
+                self, "Outil manquant",
+                f"{outil} est introuvable sur ce système."
+            )
+            return
+        mp = self.point_montage(cible)
+        if mp:
+            QMessageBox.critical(
+                self, "Partition montée",
+                f"{cible} est montée sur {mp}.\n"
+                "Démontez-la d'abord (bouton « Démonter la cible »)."
+            )
+            return
+        reponse = QMessageBox.question(
+            self, "Réparation du système de fichiers",
+            f"Réparer {cible} ({fstype}) avec : {outil} {' '.join(args_rep)} {cible}\n\n"
+            "Une réparation MODIFIE le système de fichiers. Si les données sont\n"
+            "importantes, sauvegardez-les avant (Zone 4 : clonage / image).",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reponse != QMessageBox.Yes:
+            return
+        self.lancer_process(
+            prefixe_privilege() + [outil] + args_rep + [cible], "Réparation fs"
+        )
+
+    def lancer_debit(self):
+        cible = self.exiger_cible()
+        if not cible:
+            return
+        args = prefixe_privilege() + [
+            "dd", f"if={cible}", "of=/dev/null", "bs=1M", "count=1024"
+        ]
+        self.lancer_process(args, "Test de débit (1 Go en lecture)", self.fin_debit)
+
+    def fin_debit(self, code):
+        if code == 0 and self.duree_op > 0:
+            self.log(f"Débit moyen : {1024 / self.duree_op:.0f} Mo/s")
+
+    def lancer_badblocks(self):
+        cible = self.exiger_cible()
+        if not cible:
+            return
+        if not shutil.which("badblocks"):
+            QMessageBox.critical(
+                self, "Outil manquant",
+                "badblocks est introuvable sur ce système.\n\n"
+                "sudo apt install e2fsprogs"
+            )
+            return
+        reponse = QMessageBox.question(
+            self, "Test de surface complet",
+            "badblocks va LIRE l'intégralité de la surface.\n\n"
+            "Très long (plusieurs heures sur un disque de grande capacité)\n"
+            "mais inoffensif : LECTURE SEULE, aucune écriture.\n\n"
+            f"Lancer le test sur {cible} ?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reponse == QMessageBox.Yes:
+            args = prefixe_privilege() + ["badblocks", "-sv", "-b", "4096", cible]
+            self.lancer_process(args, "Test de surface (badblocks)")
+
+    def lancer_trim(self):
+        self.lancer_process(prefixe_privilege() + ["fstrim", "-av"], "TRIM (fstrim -a)")
+
+    def lancer_nvme(self):
+        cible = self.exiger_cible()
+        if not cible or "nvme" not in os.path.basename(cible):
+            QMessageBox.warning(
+                self, "Cible non NVMe",
+                "Sélectionnez un disque NVMe (ou une de ses partitions)."
+            )
+            return
+        dev = disque_parent(cible) or cible
+        if shutil.which("nvme"):
+            self.lancer_process(
+                prefixe_privilege() + ["nvme", "smart-log", dev],
+                "Attributs NVMe", self.fin_nvme
+            )
+        elif shutil.which("smartctl"):
+            self.lancer_process(
+                prefixe_privilege() + ["smartctl", "-a", dev],
+                "SMART NVMe (smartctl)", self.fin_nvme
+            )
+        else:
+            QMessageBox.critical(
+                self, "Outil manquant",
+                "Ni nvme-cli ni smartmontools ne sont installés.\n\n"
+                "sudo apt install nvme-cli"
+            )
+
+    def fin_nvme(self, code):
+        if code != 0:
+            return
+        texte = self.sortie
+
+        def cherche(motif):
+            m = re.search(motif, texte, re.IGNORECASE)
+            return m.group(1).strip() if m else None
+
+        morceaux = []
+        usure = cherche(r"percentage[_ ]used\s*:\s*(\d+)")
+        if usure is not None:
+            morceaux.append(f"usure : {usure} %")
+        temp = cherche(r"temperature\s*:?\s*(-?\d+)")
+        if temp is not None:
+            morceaux.append(f"{temp} °C")
+        duw = cherche(r"data[_ ]units[_ ]written\s*:\s*([\d, .]+)")
+        if duw:
+            chiffres = re.sub(r"[^\d]", "", duw)
+            if chiffres:
+                morceaux.append(f"{int(chiffres) * 512000 / 1e12:.2f} To écrits")
+        erreurs = cherche(r"media[_ ]errors\s*:\s*([\d,]+)")
+        if erreurs is not None:
+            morceaux.append("erreurs médias : " + erreurs.replace(",", ""))
+        if morceaux:
+            self.log("Synthèse NVMe : " + " · ".join(morceaux))
+
+    def set_boutons_actifs(self, actif):
+        for b in (self.btn_demonter, self.btn_verifier_fs, self.btn_reparer_fs,
+                  self.btn_debit, self.btn_badblocks, self.btn_trim, self.btn_nvme,
+                  self.btn_rafraichir):
+            b.setEnabled(actif)
+        self.btn_arreter.setEnabled(not actif)
+
+    def lancer_process(self, args, titre, fin=None):
+        if self.process is not None:
+            QMessageBox.warning(
+                self, "Opération en cours",
+                "Un outil est déjà en cours d'exécution."
+            )
+            return
+        self.op_titre = titre
+        self.fin_callback = fin
+        self.t0 = datetime.now()
+        self.duree_op = 0
+        self.sortie = ""
+        self.log("---")
+        self.log("Commande : " + " ".join(args))
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.lire_sortie)
+        self.process.finished.connect(lambda code, statut: self.operation_terminee(titre, code))
+        self.process.errorOccurred.connect(self.erreur_processus)
+        self.process.start(args[0], args[1:])
+        self.set_boutons_actifs(False)
+
+    def lire_sortie(self):
+        if self.process is None:
+            return
+        donnees = bytes(self.process.readAllStandardOutput()).decode("utf-8", "replace")
+        self.sortie += donnees
+        for ligne in donnees.replace("\r", "\n").splitlines():
+            ligne = ligne.strip()
+            if ligne:
+                self.log(ligne)
+
+    ERREURS_PROCESSUS = {
+        0: "impossible de démarrer (commande introuvable ?)",
+        1: "interrompu (arrêt demandé ou plantage)",
+        2: "délai dépassé",
+        3: "erreur d'écriture",
+        4: "erreur de lecture",
+        5: "erreur inconnue",
+    }
+
+    def decrire_code_retour(self, code):
+        if code in (9, 137, -9):
+            return "interrompu par l'utilisateur (bouton « Arrêter »)"
+        if code in (15, 143, -15):
+            return "interrompu (SIGTERM)"
+        if code == 1:
+            return "échec — voir les messages ci-dessus dans le journal"
+        return None
+
+    def operation_terminee(self, titre, code):
+        try:
+            duree = (datetime.now() - self.t0).total_seconds()
+        except Exception:
+            duree = 0
+        self.duree_op = duree
+        rappel = self.fin_callback
+        self.fin_callback = None
+        cause = self.decrire_code_retour(code)
+        suffixe = f" ({cause})" if cause else ""
+        self.log(f"[{titre}] terminé — code retour {code}{suffixe} — {duree:.0f} s")
+        if self.process is not None:
+            self.process.deleteLater()
+            self.process = None
+        self.set_boutons_actifs(True)
+        if rappel:
+            try:
+                rappel(code)
+            except Exception as e:
+                self.log(f"Erreur d'analyse du résultat : {e}")
+
+    def erreur_processus(self, erreur):
+        if self.process is None:
+            return
+        motif = self.ERREURS_PROCESSUS.get(erreur, f"code {erreur}")
+        self.log(f"Erreur du processus : {motif}")
+        self.fin_callback = None
+        self.process.deleteLater()
+        self.process = None
+        self.set_boutons_actifs(True)
+
+    def arreter(self):
+        if self.process is not None:
+            self.log("Interruption demandée par l'utilisateur...")
+            self.process.kill()
 
 
 class KRecuperationWindow(QDialog):
@@ -1882,6 +2906,12 @@ class KDiskApp(QMainWindow):
         layout_z5_n2.addWidget(self.btn_rep_redige)
         layout_zone5.addLayout(layout_z5_n2)
 
+        layout_z5_n3 = QHBoxLayout()
+        self.btn_outils_disques = QPushButton("🧰 Outils avancés (fsck / surface / SSD-NVMe)")
+        self.btn_outils_disques.clicked.connect(self.ouvrir_koutils_disques)
+        layout_z5_n3.addWidget(self.btn_outils_disques)
+        layout_zone5.addLayout(layout_z5_n3)
+
         self.group_zone5.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.group_zone5.setLayout(layout_zone5)
         main_layout.addWidget(self.group_zone5)
@@ -1987,10 +3017,27 @@ class KDiskApp(QMainWindow):
         main_layout.addWidget(self.group_zone9)
 
         # ==========================================
-        # ZONES 10, 11, 12 et 13 : fonctionnalités à venir
+        # ZONE 10 : Comparaison de rapports d'audit
+        # (hors zone verrouillée : aucun privilège requis)
+        # ==========================================
+        self.group_zone10 = QGroupBox(" Zone 10 : Comparaison de rapports d'audit ")
+        layout_zone10 = QHBoxLayout()
+
+        lbl_kcomparaison = QLabel("Avant / après : évolution du score /100 et diff des recommandations entre deux audits de la Zone 9.")
+        self.btn_open_kcomparaison = QPushButton("Comparer deux audits")
+        self.btn_open_kcomparaison.clicked.connect(self.ouvrir_kcomparaison)
+
+        layout_zone10.addWidget(lbl_kcomparaison, stretch=1)
+        layout_zone10.addWidget(self.btn_open_kcomparaison)
+        layout_zone10.setContentsMargins(9, 2, 9, 2)
+        self.group_zone10.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.group_zone10.setLayout(layout_zone10)
+        main_layout.addWidget(self.group_zone10)
+
+        # ==========================================
+        # ZONES 11, 12 et 13 : fonctionnalités à venir
         # (QGroupBox réservés, implémentation en sessions suivantes)
         # ==========================================
-        main_layout.addWidget(self.creer_zone_vide(" Zone 10 : Comparaison de rapports d'audit "))
         main_layout.addWidget(self.creer_zone_vide(" Zone 11 : Vérification des mises à jour et paquets "))
         main_layout.addWidget(self.creer_zone_vide(" Zone 12 : Journal d'exécution direct "))
         main_layout.addWidget(self.creer_zone_vide(" Zone 13 : Détection des signes d'alerte système "))
@@ -2559,9 +3606,17 @@ Date / Contexte : Analyse Kaisen Linux - KareDiag
         self.fenetre_kclonage = KClonageWindow(self, self.extraire_chemin_disque())
         self.fenetre_kclonage.exec_()
 
+    def ouvrir_koutils_disques(self):
+        self.fenetre_koutils_disques = KOutilsDisquesWindow(self, self.extraire_chemin_disque())
+        self.fenetre_koutils_disques.exec_()
+
     def ouvrir_kaudit(self):
         self.fenetre_kaudit = KAuditWindow(self, self.extraire_chemin_disque())
         self.fenetre_kaudit.exec_()
+
+    def ouvrir_kcomparaison(self):
+        self.fenetre_kcomparaison = KAuditCompareWindow(self)
+        self.fenetre_kcomparaison.exec_()
 
     def ouvrir_fenetre_rapport(self, titre, texte):
         self.fenetre_rapport = RapportWindow(titre, texte)
@@ -2572,7 +3627,7 @@ if __name__ == "__main__":
     try:
         # Authentification unique : une seule demande PolicyKit au lancement.
         # Si l'utilisateur refuse ou si l'élévation échoue, l'app continue
-        # en mode restreint (Zones 3, 4, 8 et 9 ouvertes sans privilèges).
+        # en mode restreint (Zones 3, 4, 8, 9 et 10 ouvertes sans privilèges).
         if os.geteuid() != 0:
             code = elever_application()
             if code == 0:
