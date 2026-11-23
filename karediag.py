@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView
 )
 from PyQt5.QtCore import Qt, QTimer, QProcess
+from PyQt5.QtGui import QColor, QBrush
 
 NOM_APPLICATION = "KareDiag"
 
@@ -303,6 +304,868 @@ class KPVWindow(QDialog):
                                     f"Le rapport JSON a été enregistré ici :\n{report_path}")
         except Exception as e:
             QMessageBox.critical(self, "Erreur", f"Erreur lors de l'enregistrement :\n{e}")
+
+
+# ============================================================
+# KareDiag - Zone 11 : vérification des mises à jour et paquets
+# (Debian/Kaisen : APT/DPKG — contrôles sans modification)
+# ============================================================
+class KMAJWindow(QDialog):
+    """Zone 11 : état des mises à jour et santé des paquets APT/DPKG."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Vérification des mises à jour et paquets (Zone 11)")
+        self.resize(780, 620)
+        self.setMinimumSize(700, 560)
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4;
+                font-weight: bold;
+                font-size: 13px;
+                border: 2px solid #3e4451;
+                border-radius: 8px;
+                margin-top: 12px;
+                background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                background-color: #2188ff;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel { color: #abb2bf; font-size: 12px; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("KareDiag - Vérification des mises à jour et paquets")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Contrôles APT/DPKG (aucune modification du système).\n"
+            "« Actualiser les listes » requiert l'authentification PolicyKit ;\n"
+            "les autres vérifications se font sans privilèges."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        btn_frame = QGridLayout()
+        self.btn_update = QPushButton("Actualiser les listes (apt update)")
+        self.btn_update.clicked.connect(self.lancer_maj_listes)
+        self.btn_upgradable = QPushButton("Paquets à mettre à jour")
+        self.btn_upgradable.clicked.connect(self.lister_maj_disponibles)
+        self.btn_brises = QPushButton("Paquets brisés / dépendances")
+        self.btn_brises.clicked.connect(self.verifier_paquets_bries)
+        self.btn_orphelins = QPushButton("Paquets orphelins (autoremove)")
+        self.btn_orphelins.clicked.connect(self.lister_orphelins)
+        self.btn_export = QPushButton("Exporter le rapport")
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(self.exporter_rapport)
+
+        btn_frame.addWidget(self.btn_update, 0, 0)
+        btn_frame.addWidget(self.btn_upgradable, 0, 1)
+        btn_frame.addWidget(self.btn_brises, 1, 0)
+        btn_frame.addWidget(self.btn_orphelins, 1, 1)
+        btn_frame.addWidget(self.btn_export, 2, 0, 1, 2)
+        layout.addLayout(btn_frame)
+
+        log_frame = QGroupBox(" Rapport des vérifications ")
+        log_layout = QVBoxLayout(log_frame)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("""
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 10px;
+            border: 1px solid #3e4451;
+            border-radius: 4px;
+        """)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(log_frame)
+
+        self.boutons = [self.btn_update, self.btn_upgradable, self.btn_brises, self.btn_orphelins]
+
+    def log(self, message):
+        self.log_text.append(message)
+        QApplication.processEvents()
+
+    def set_boutons(self, actif):
+        for bouton in self.boutons:
+            bouton.setEnabled(actif)
+
+    def run_cmd(self, commande, timeout=300):
+        try:
+            res = subprocess.run(commande, capture_output=True, text=True, timeout=timeout)
+            return res.returncode == 0, ((res.stdout or "") + (res.stderr or ""))
+        except FileNotFoundError:
+            return False, f"Commande introuvable : {commande[0]}"
+        except Exception as e:
+            return False, str(e)
+
+    def afficher_sortie(self, sortie, max_lignes=60):
+        lignes = [l for l in sortie.splitlines() if l.strip()]
+        if len(lignes) > max_lignes:
+            lignes = lignes[:max_lignes] + [
+                f"... ({len(lignes) - max_lignes} lignes supplémentaires omises)"]
+        for l in lignes:
+            self.log("   " + l)
+
+    def lancer_maj_listes(self):
+        if shutil.which("apt-get") is None:
+            self.log("[KO] apt-get introuvable : vérification réservée aux "
+                     "distributions à base de Debian (Kaisen Linux).")
+            return
+        self.set_boutons(False)
+        self.log(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                 "Actualisation des listes de paquets (apt-get update)...")
+        ok, sortie = self.run_cmd(prefixe_privilege() + ["apt-get", "update"], timeout=600)
+        self.afficher_sortie(sortie)
+        if ok:
+            self.log("[OK] Listes de paquets actualisées.")
+        else:
+            self.log("[KO] Échec de l'actualisation (authentification refusée "
+                     "ou dépôts inaccessibles).")
+        self.set_boutons(True)
+
+    def lister_maj_disponibles(self):
+        if shutil.which("apt") is None:
+            self.log("[KO] apt introuvable : vérification réservée aux "
+                     "distributions à base de Debian (Kaisen Linux).")
+            return
+        self.set_boutons(False)
+        self.log("\n[*] Recherche des paquets à mettre à jour...")
+        ok, sortie = self.run_cmd(["env", "LC_ALL=C", "apt", "list", "--upgradable"])
+        paquets = [l for l in sortie.splitlines() if "/" in l]
+        if ok and paquets:
+            self.log(f"[ALERTE] {len(paquets)} paquet(s) peuvent être mis à jour :")
+            self.afficher_sortie("\n".join(paquets))
+            self.log("[i] Utilisez « sudo apt upgrade » pour les installer.")
+        elif ok:
+            self.log("[OK] Aucune mise à jour disponible : le système est à jour.")
+        else:
+            self.log(f"[KO] Échec de la lecture des mises à jour : {sortie.strip()}")
+        self.set_boutons(True)
+
+    def verifier_paquets_bries(self):
+        self.set_boutons(False)
+        self.log("\n[*] Vérification de l'état des paquets (dpkg --audit)...")
+        ok, sortie = self.run_cmd(["env", "LC_ALL=C", "dpkg", "--audit"])
+        if sortie.strip():
+            self.log("[ALERTE] Des paquets sont endommagés ou incohérents :")
+            self.afficher_sortie(sortie)
+            self.log("[i] Lancez « sudo dpkg --configure -a » puis "
+                     "« sudo apt install -f » pour réparer.")
+        else:
+            self.log("[OK] DPKG : aucun paquet endommagé.")
+        if shutil.which("apt-get") is None:
+            self.set_boutons(True)
+            return
+        self.log("[*] Simulation de correction des dépendances (apt-get -s install -f)...")
+        ok2, sortie2 = self.run_cmd(["env", "LC_ALL=C", "apt-get", "-s", "install", "-f"])
+        actions = [l for l in sortie2.splitlines() if l.startswith(("Inst ", "Remv ", "Purg "))]
+        if ok2:
+            if actions:
+                self.log(f"[ALERTE] Des dépendances demandent une correction "
+                         f"({len(actions)} action(s) simulée(s)) :")
+                self.afficher_sortie("\n".join(actions))
+            else:
+                self.log("[OK] Dépendances APT : aucune correction nécessaire.")
+        else:
+            self.log(f"[KO] Simulation impossible : {sortie2.strip()}")
+        self.set_boutons(True)
+
+    def lister_orphelins(self):
+        if shutil.which("apt-get") is None:
+            self.log("[KO] apt-get introuvable : vérification réservée aux "
+                     "distributions à base de Debian (Kaisen Linux).")
+            return
+        self.set_boutons(False)
+        self.log("\n[*] Recherche des paquets orphelins (simulation d'autoremove)...")
+        ok, sortie = self.run_cmd(["env", "LC_ALL=C", "apt-get", "-s", "autoremove"])
+        orphelins = [l for l in sortie.splitlines() if l.startswith(("Remv ", "Purg "))]
+        if ok and orphelins:
+            self.log(f"[i] {len(orphelins)} paquet(s) devenu(s) orphelin(s) :")
+            self.afficher_sortie("\n".join(orphelins))
+            self.log("[i] « sudo apt autoremove » les supprimera (vérifiez la liste avant).")
+        elif ok:
+            self.log("[OK] Aucun paquet orphelin.")
+        else:
+            self.log(f"[KO] Simulation impossible : {sortie.strip()}")
+        self.set_boutons(True)
+
+    def exporter_rapport(self):
+        RapportWindow("Rapport - Mises à jour et paquets (Zone 11)",
+                      self.log_text.toPlainText()).exec_()
+
+
+# ============================================================
+# KareDiag - Zone 12 : journal d'exécution direct (journalctl)
+# Affichage en temps réel avec filtres, priorités et export.
+# ============================================================
+class KJournalWindow(QDialog):
+    """Zone 12 : suivi en direct du journal système via journalctl."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Journal d'exécution direct (Zone 12)")
+        self.resize(860, 640)
+        self.setMinimumSize(760, 560)
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4;
+                font-weight: bold;
+                font-size: 13px;
+                border: 2px solid #3e4451;
+                border-radius: 8px;
+                margin-top: 12px;
+                background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                background-color: #2188ff;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel, QComboBox { color: #abb2bf; font-size: 12px; }
+            QComboBox, QLineEdit {
+                background-color: #21252b;
+                border: 1px solid #4b5263;
+                border-radius: 4px;
+                padding: 4px;
+                color: #abb2bf;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("KareDiag - Journal d'exécution direct")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Journal système en direct (journalctl). Sans privilèges, une partie du "
+            "journal système peut rester masquée : ajoutez votre utilisateur aux groupes "
+            "« systemd-journal » et « adm », ou utilisez le mode administrateur."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        ctrl_frame = QGroupBox(" Contrôles du suivi ")
+        grid = QGridLayout(ctrl_frame)
+
+        grid.addWidget(QLabel("Source :"), 0, 0)
+        self.combo_source = QComboBox()
+        self.combo_source.addItems(["Système complet", "Noyau (dmesg)", "Session utilisateur"])
+        grid.addWidget(self.combo_source, 0, 1)
+
+        grid.addWidget(QLabel("Priorité minimale :"), 0, 2)
+        self.combo_prio = QComboBox()
+        self.combo_prio.addItems(
+            ["Toutes", "Information et supérieur", "Avertissements et supérieur", "Erreurs et supérieur"])
+        grid.addWidget(self.combo_prio, 0, 3)
+
+        grid.addWidget(QLabel("Filtre texte :"), 1, 0)
+        self.ed_filtre = QLineEdit()
+        self.ed_filtre.setPlaceholderText("N'affiche que les lignes contenant ce texte...")
+        grid.addWidget(self.ed_filtre, 1, 1, 1, 3)
+        layout.addWidget(ctrl_frame)
+
+        btn_frame = QHBoxLayout()
+        self.btn_suivi = QPushButton("▶ Démarrer le suivi")
+        self.btn_suivi.clicked.connect(self.basculer_suivi)
+        self.btn_pause = QPushButton("⏸ Pause")
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.clicked.connect(self.basculer_pause)
+        self.btn_export = QPushButton("Sauvegarder le journal")
+        self.btn_export.clicked.connect(self.sauvegarder)
+        self.btn_vider = QPushButton("Vider l'affichage")
+        self.btn_vider.clicked.connect(self.log_text.clear)
+
+        btn_frame.addWidget(self.btn_suivi)
+        btn_frame.addWidget(self.btn_pause)
+        btn_frame.addWidget(self.btn_export)
+        btn_frame.addWidget(self.btn_vider)
+        layout.addLayout(btn_frame)
+
+        log_frame = QGroupBox(" Journal en direct ")
+        log_layout = QVBoxLayout(log_frame)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("""
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 10px;
+            border: 1px solid #3e4451;
+            border-radius: 4px;
+        """)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(log_frame)
+
+        self.process = None
+        self.tampon = ""
+        self.en_pause = False
+        self.file_pause = []
+        self.couleur_normale = QColor("#00ff00")
+
+    def log(self, message, couleur=None):
+        if couleur is not None:
+            self.log_text.setTextColor(couleur)
+        self.log_text.append(message)
+        self.log_text.setTextColor(self.couleur_normale)
+
+    def args_journal(self):
+        args = ["journalctl", "-f", "-n", "200", "--no-pager"]
+        source = self.combo_source.currentIndex()
+        if source == 1:
+            args.append("-k")
+        elif source == 2:
+            args.append("--user")
+        prio = ["", "6", "4", "3"][self.combo_prio.currentIndex()]
+        if prio:
+            args += ["-p", prio]
+        return args
+
+    def basculer_suivi(self):
+        if self.process is None:
+            self.demarrer_suivi()
+        else:
+            self.arreter_suivi()
+
+    def demarrer_suivi(self):
+        if shutil.which("journalctl") is None:
+            self.log("[KO] journalctl introuvable sur ce système.", QColor("#e06c75"))
+            return
+        args = self.args_journal()
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.lire_sortie)
+        self.process.finished.connect(self.suivi_termine)
+        self.process.errorOccurred.connect(self.erreur_processus)
+        self.process.start(args[0], args[1:])
+        self.tampon = ""
+        self.file_pause = []
+        self.en_pause = False
+        self.btn_pause.setText("⏸ Pause")
+        self.btn_pause.setEnabled(True)
+        self.btn_suivi.setText("■ Arrêter le suivi")
+        self.log(f"[i] Suivi démarré ({args[2:]}) : les nouvelles entrées s'affichent ici.",
+                 QColor("#e5c07b"))
+
+    def arreter_suivi(self):
+        if self.process is None:
+            return
+        self.process.kill()
+        self.process.waitForFinished(2000)
+        self.process = None
+        self.btn_suivi.setText("▶ Démarrer le suivi")
+        self.btn_pause.setEnabled(False)
+        self.log("[i] Suivi arrêté.", QColor("#e5c07b"))
+
+    def basculer_pause(self):
+        self.en_pause = not self.en_pause
+        self.btn_pause.setText("▶ Reprendre" if self.en_pause else "⏸ Pause")
+        if not self.en_pause:
+            for ligne in self.file_pause:
+                self.ajouter_ligne(ligne)
+            self.file_pause = []
+
+    def lire_sortie(self):
+        data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        self.tampon += data
+        if "\n" not in self.tampon:
+            return
+        lignes, self.tampon = self.tampon.rsplit("\n", 1)
+        for ligne in lignes.splitlines():
+            self.ajouter_ligne(ligne)
+
+    def ajouter_ligne(self, ligne):
+        filtre = self.ed_filtre.text().strip().lower()
+        if filtre and filtre not in ligne.lower():
+            return
+        if self.en_pause:
+            self.file_pause.append(ligne)
+            if len(self.file_pause) > 2000:
+                self.file_pause.pop(0)
+            return
+        bas = ligne.lower()
+        rouge = any(m in bas for m in (
+            "error", "erreur", "failed", "échec", "critique", "critical", "fatal",
+            "emerg", "segfault", "segmentation fault", "out of memory", "oom-killer"))
+        jaune = not rouge and any(m in bas for m in (
+            "warn", "avertissement", "attention", "timeout", "refused", "degraded"))
+        if rouge:
+            self.log(ligne, QColor("#e06c75"))
+        elif jaune:
+            self.log(ligne, QColor("#e5c07b"))
+        else:
+            self.log(ligne)
+
+    def suivi_termine(self):
+        if self.process is not None:
+            self.process = None
+            self.btn_suivi.setText("▶ Démarrer le suivi")
+            self.btn_pause.setEnabled(False)
+            self.log("[i] Suivi terminé (commande terminée).", QColor("#e5c07b"))
+
+    def erreur_processus(self, erreur):
+        self.log(f"[KO] journalctl : {erreur}", QColor("#e06c75"))
+        self.process = None
+        self.btn_suivi.setText("▶ Démarrer le suivi")
+        self.btn_pause.setEnabled(False)
+
+    def sauvegarder(self):
+        chemin, _ = QFileDialog.getSaveFileName(
+            self, "Sauvegarder le journal",
+            os.path.join(bureau_utilisateur(),
+                         f"karediag_journal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"),
+            "Fichiers texte (*.txt)")
+        if not chemin:
+            return
+        try:
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write(self.log_text.toPlainText())
+            QMessageBox.information(self, "Journal exporté",
+                                    f"Le journal a été enregistré ici :\n{chemin}")
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur",
+                                 f"Erreur lors de l'enregistrement :\n{e}")
+
+    def closeEvent(self, event):
+        self.arreter_suivi()
+        event.accept()
+
+
+# ============================================================
+# KareDiag - Zone 13 : détection des signes d'alerte système
+# (unités en échec, erreurs noyau, OOM, surchauffe, disques saturés)
+# ============================================================
+class KAlertesWindow(QDialog):
+    """Zone 13 : scan des signes d'alerte du système avec sévérité."""
+    MOTIFS = [
+        ("Mémoire : kill OOM (manque de RAM) détecté", [r"out of memory", r"oom-?killer", r"killed process"], True),
+        ("Disques : erreurs d'E/S ou de système de fichiers",
+         [r"i/o error", r"ext4-fs error", r"read-only file system", r"bad block",
+          r"medium error", r"scsi error"], True),
+        ("Matériel : erreurs ATA/NVMe", [r"ata\d+.*\berror\b", r"nvme\d+.*\berror\b", r"nvme\d+.*timeout"], False),
+        ("Processus : segfault détecté", [r"segmentation fault", r"general protection fault"], False),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Détection des signes d'alerte système (Zone 13)")
+        self.resize(860, 640)
+        self.setMinimumSize(760, 560)
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4;
+                font-weight: bold;
+                font-size: 13px;
+                border: 2px solid #3e4451;
+                border-radius: 8px;
+                margin-top: 12px;
+                background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                background-color: #2188ff;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel { color: #abb2bf; font-size: 12px; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("KareDiag - Détection des signes d'alerte système")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Analyse du journal et du matériel : unités systemd en échec, erreurs de "
+            "disques, manque de mémoire, surchauffe, partitions saturées. "
+            "Sans privilèges, le journal système complet peut rester partiellement inaccessible."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        btn_frame = QHBoxLayout()
+        self.btn_scan = QPushButton("🔍 Scanner maintenant")
+        self.btn_scan.clicked.connect(self.scanner)
+        self.btn_export = QPushButton("Exporter le rapport")
+        self.btn_export.setEnabled(False)
+        self.btn_export.clicked.connect(self.exporter_rapport)
+
+        btn_frame.addWidget(self.btn_scan)
+        btn_frame.addWidget(self.btn_export)
+        layout.addLayout(btn_frame)
+
+        self.lbl_resume = QLabel("Aucun scan effectué.")
+        self.lbl_resume.setStyleSheet("font-weight: bold; color: #e5c07b;")
+        layout.addWidget(self.lbl_resume)
+
+        log_frame = QGroupBox(" Résultat du scan ")
+        log_layout = QVBoxLayout(log_frame)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("""
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 10px;
+            border: 1px solid #3e4451;
+            border-radius: 4px;
+        """)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(log_frame)
+
+        self.nb_critiques = 0
+        self.nb_avertissements = 0
+
+    def log(self, message):
+        self.log_text.append(message)
+        QApplication.processEvents()
+
+    def signaler(self, critique, message):
+        if critique:
+            self.nb_critiques += 1
+            self.log(f"[CRITIQUE] {message}")
+        else:
+            self.nb_avertissements += 1
+            self.log(f"[AVERTISSEMENT] {message}")
+
+    def run_cmd(self, commande, timeout=120):
+        try:
+            res = subprocess.run(commande, capture_output=True, text=True, timeout=timeout)
+            return res.returncode == 0, ((res.stdout or "") + (res.stderr or ""))
+        except FileNotFoundError:
+            return False, f"Commande introuvable : {commande[0]}"
+        except Exception as e:
+            return False, str(e)
+
+    def scanner(self):
+        self.btn_scan.setEnabled(False)
+        self.log_text.clear()
+        self.nb_critiques = 0
+        self.nb_avertissements = 0
+        self.log(f"=== Scan des signes d'alerte du "
+                 f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} ===\n")
+
+        self.verifier_unites_echec()
+        self.verifier_journal_erreurs()
+        self.verifier_journal_noyau()
+        self.verifier_capteurs()
+        self.verifier_partitions_saturees()
+        self.verifier_memoire()
+
+        resume = (f"Scan terminé : {self.nb_critiques} critique(s), "
+                  f"{self.nb_avertissements} avertissement(s).")
+        self.log("")
+        self.log("=== " + resume + " ===")
+        if self.nb_critiques == 0 and self.nb_avertissements == 0:
+            self.lbl_resume.setText("✅ " + resume)
+            self.lbl_resume.setStyleSheet("font-weight: bold; color: #98c379;")
+        elif self.nb_critiques == 0:
+            self.lbl_resume.setText("⚠️ " + resume)
+            self.lbl_resume.setStyleSheet("font-weight: bold; color: #e5c07b;")
+        else:
+            self.lbl_resume.setText("🛑 " + resume)
+            self.lbl_resume.setStyleSheet("font-weight: bold; color: #e06c75;")
+        self.btn_export.setEnabled(True)
+        self.btn_scan.setEnabled(True)
+
+    def verifier_unites_echec(self):
+        self.log("[*] Unités systemd en échec...")
+        ok, sortie = self.run_cmd(
+            ["env", "LC_ALL=C", "systemctl", "list-units",
+             "--state=failed", "--no-legend", "--no-pager"])
+        if not ok:
+            self.log("[INFO] systemctl indisponible ou inaccessible.")
+            return
+        unites = [l.strip() for l in sortie.splitlines() if " failed " in l]
+        if unites:
+            self.signaler(True, f"{len(unites)} unité(s) systemd en échec :")
+            for l in unites[:15]:
+                self.log("   " + l)
+        else:
+            self.log("[OK] Aucune unité systemd en échec.")
+
+    def verifier_journal_erreurs(self):
+        self.log("[*] Entrées de niveau ERREUR depuis le démarrage (journalctl -p 3)...")
+        ok, sortie = self.run_cmd(
+            ["env", "LC_ALL=C", "journalctl", "-p", "3", "-b", "-q", "--no-pager"],
+            timeout=180)
+        if not ok:
+            self.log("[INFO] Journal système inaccessible sans privilèges (scan partiel).")
+            return
+        lignes = sortie.splitlines()
+        if lignes:
+            self.signaler(False, f"{len(lignes)} entrée(s) de niveau ERREUR depuis le démarrage :")
+            for l in lignes[-30:]:
+                self.log("   " + l)
+        else:
+            self.log("[OK] Aucune erreur système enregistrée depuis le démarrage.")
+
+    def verifier_journal_noyau(self):
+        self.log("[*] Journal noyau : OOM, disques, matériel...")
+        ok, sortie = self.run_cmd(
+            ["env", "LC_ALL=C", "journalctl", "-k", "-b", "-q", "--no-pager"],
+            timeout=180)
+        if not ok:
+            self.log("[INFO] Journal noyau inaccessible sans privilèges.")
+            return
+        interroges = 0
+        for libelle, motifs, critique in self.MOTIFS:
+            correspondances = [l for l in sortie.splitlines()
+                               if any(re.search(m, l, re.IGNORECASE) for m in motifs)]
+            if correspondances:
+                self.signaler(critique, f"{libelle} — {len(correspondances)} entrée(s) :")
+                for l in correspondances[-10:]:
+                    self.log("   " + l)
+                interroges += 1
+        if interroges == 0:
+            self.log("[OK] Aucun motif d'alerte détecté dans le journal noyau.")
+
+    def verifier_capteurs(self):
+        self.log("[*] Capteurs : températures et alarmes matérielles...")
+        capteurs = mesures_hwmon()
+        alertes = 0
+        for capteur in capteurs:
+            if capteur["etat"] != "OK":
+                alertes += 1
+                texte = (f"{capteur['source']} : {capteur['nom']} = "
+                         f"{capteur['valeur']} {capteur['unite']} "
+                         f"(limite {capteur['limite']})")
+                self.signaler(capteur["etat"] == "ALERTE", texte)
+        if alertes == 0:
+            self.log(f"[OK] {len(capteurs)} capteur(s) interrogé(s), aucune alerte.")
+
+    def verifier_partitions_saturees(self):
+        self.log("[*] Espace disque des partitions montées...")
+        ok, sortie = self.run_cmd(["df", "-P"])
+        if not ok:
+            self.log("[INFO] Lecture de l'espace disque impossible.")
+            return
+        saturees = 0
+        for ligne in sortie.splitlines()[1:]:
+            champs = ligne.split()
+            if len(champs) < 6 or not champs[0].startswith("/dev/"):
+                continue
+            if any(champs[0].startswith(p) for p in ("/dev/loop", "/dev/squashfs")):
+                continue
+            try:
+                pourcentage = int(champs[4].rstrip("%"))
+            except ValueError:
+                continue
+            if pourcentage > 95:
+                self.signaler(True, f"{champs[0]} monté sur {champs[5]} : {pourcentage} % occupé.")
+                saturees += 1
+            elif pourcentage > 90:
+                self.signaler(False, f"{champs[0]} monté sur {champs[5]} : {pourcentage} % occupé.")
+                saturees += 1
+        if saturees == 0:
+            self.log("[OK] Aucune partition saturée (> 90 %).")
+
+    def verifier_memoire(self):
+        self.log("[*] Mémoire vive et swap...")
+        informations = {}
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for ligne in f:
+                    cle, _, reste = ligne.partition(":")
+                    informations[cle.strip()] = int(reste.strip().split()[0])
+        except (OSError, ValueError, IndexError):
+            self.log("[INFO] Lecture de /proc/meminfo impossible.")
+            return
+        total = informations.get("MemTotal", 0)
+        disponible = informations.get("MemAvailable", total)
+        swap_total = informations.get("SwapTotal", 0)
+        swap_libre = informations.get("SwapFree", 0)
+        if total and disponible / total < 0.05:
+            self.signaler(True, f"Mémoire vive presque saturée : {disponible // 1024} Mo disponibles sur {total // 1024} Mo.")
+        else:
+            self.log("[OK] Mémoire vive disponible.")
+        if swap_total and swap_libre / swap_total < 0.10:
+            self.signaler(False, f"Swap presque saturé : {int(100 * swap_libre / swap_total)} % libre.")
+
+    def exporter_rapport(self):
+        RapportWindow("Rapport - Signes d'alerte (Zone 13)",
+                      self.log_text.toPlainText()).exec_()
+
+
+# ============================================================
+# KareDiag - Zone 15 : utilitaires capteurs (hwmon), vitesses
+# CPU et charge — lecture directe, sans privilèges
+# ============================================================
+def lire_texte_fichier(chemin):
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def lire_entier_fichier(chemin, diviseur=1):
+    try:
+        return int(lire_texte_fichier(chemin)) / diviseur
+    except (ValueError, OSError):
+        return None
+
+
+def capteur_etat(alarme, ratio):
+    """État d'un capteur : ALERTE / À surveiller / OK (ratio : valeur / limite critique)."""
+    if alarme or (ratio is not None and ratio >= 0.9):
+        return "ALERTE"
+    if ratio is not None and ratio >= 0.75:
+        return "À surveiller"
+    return "OK"
+
+
+def mesures_hwmon():
+    """Liste des capteurs de la carte mère depuis /sys/class/hwmon :
+    températures, ventilateurs, tensions, courants et puissances."""
+    capteurs = []
+    for chemin_chip in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        nom_chip = lire_texte_fichier(os.path.join(chemin_chip, "name")) or "inconnu"
+
+        for chemin in sorted(glob.glob(os.path.join(chemin_chip, "temp*_input"))):
+            cle = os.path.basename(chemin)[: -len("_input")]
+            valeur = lire_entier_fichier(chemin, 1000)
+            if valeur is None:
+                continue
+            etiquette = (lire_texte_fichier(os.path.join(chemin_chip, cle + "_label"))
+                         or f"Température {cle}")
+            critique = lire_entier_fichier(os.path.join(chemin_chip, cle + "_crit"), 1000)
+            alarme = lire_texte_fichier(os.path.join(chemin_chip, cle + "_alarm")) == "1"
+            ratio = (valeur / critique) if critique else None
+            capteurs.append({
+                "source": nom_chip,
+                "type": "Température",
+                "nom": etiquette,
+                "valeur": f"{valeur:.1f}",
+                "unite": "°C",
+                "limite": f"{critique:.0f} °C" if critique else "—",
+                "etat": capteur_etat(alarme, ratio),
+            })
+
+        for chemin in sorted(glob.glob(os.path.join(chemin_chip, "fan*_input"))):
+            cle = os.path.basename(chemin)[: -len("_input")]
+            valeur = lire_entier_fichier(chemin)
+            if valeur is None:
+                continue
+            alarme = lire_texte_fichier(os.path.join(chemin_chip, cle + "_alarm")) == "1"
+            capteurs.append({
+                "source": nom_chip,
+                "type": "Ventilateur",
+                "nom": lire_texte_fichier(os.path.join(chemin_chip, cle + "_label")) or cle,
+                "valeur": f"{valeur:.0f}",
+                "unite": "tr/min",
+                "limite": "—",
+                "etat": capteur_etat(alarme, None),
+            })
+
+        for chemin in sorted(glob.glob(os.path.join(chemin_chip, "in*_input"))):
+            cle = os.path.basename(chemin)[: -len("_input")]
+            valeur = lire_entier_fichier(chemin, 1000)
+            if valeur is None:
+                continue
+            alarme = lire_texte_fichier(os.path.join(chemin_chip, cle + "_alarm")) == "1"
+            capteurs.append({
+                "source": nom_chip,
+                "type": "Tension",
+                "nom": lire_texte_fichier(os.path.join(chemin_chip, cle + "_label")) or cle,
+                "valeur": f"{valeur:.3f}",
+                "unite": "V",
+                "limite": "—",
+                "etat": capteur_etat(alarme, None),
+            })
+
+        for chemin in sorted(glob.glob(os.path.join(chemin_chip, "curr*_input"))):
+            cle = os.path.basename(chemin)[: -len("_input")]
+            valeur = lire_entier_fichier(chemin, 1000)
+            if valeur is None:
+                continue
+            alarme = lire_texte_fichier(os.path.join(chemin_chip, cle + "_alarm")) == "1"
+            capteurs.append({
+                "source": nom_chip,
+                "type": "Courant",
+                "nom": lire_texte_fichier(os.path.join(chemin_chip, cle + "_label")) or cle,
+                "valeur": f"{valeur:.3f}",
+                "unite": "A",
+                "limite": "—",
+                "etat": capteur_etat(alarme, None),
+            })
+
+        for chemin in sorted(glob.glob(os.path.join(chemin_chip, "power*_input"))):
+            cle = os.path.basename(chemin)[: -len("_input")]
+            valeur = lire_entier_fichier(chemin, 1000000)
+            if valeur is None:
+                continue
+            alarme = lire_texte_fichier(os.path.join(chemin_chip, cle + "_alarm")) == "1"
+            capteurs.append({
+                "source": nom_chip,
+                "type": "Puissance",
+                "nom": lire_texte_fichier(os.path.join(chemin_chip, cle + "_label")) or cle,
+                "valeur": f"{valeur:.2f}",
+                "unite": "W",
+                "limite": "—",
+                "etat": capteur_etat(alarme, None),
+            })
+
+    return capteurs
+
+
+def frequences_cpu():
+    """Fréquence actuelle (MHz) de chaque cœur logique depuis /proc/cpuinfo."""
+    freqs = []
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
+            for ligne in f:
+                if ligne.lower().startswith("cpu mhz"):
+                    try:
+                        freqs.append(float(ligne.split(":", 1)[1].strip()))
+                    except (ValueError, IndexError):
+                        pass
+    except OSError:
+        pass
+    return freqs
 
 
 # ============================================================
@@ -2754,7 +3617,7 @@ class KDiskApp(QMainWindow):
         if est_root():
             titre_fenetre += "  —  [🛡️ Mode Administrateur]"
         self.setWindowTitle(titre_fenetre)
-        self.resize(950, 900)
+        self.resize(980, 1040)
 
         self.setStyleSheet("""
             QMainWindow { background-color: #181a1f; }
@@ -3035,12 +3898,58 @@ class KDiskApp(QMainWindow):
         main_layout.addWidget(self.group_zone10)
 
         # ==========================================
-        # ZONES 11, 12 et 13 : fonctionnalités à venir
-        # (QGroupBox réservés, implémentation en sessions suivantes)
+        # ZONE 11 : Vérification des mises à jour et paquets
+        # (hors zone verrouillée : fonctionne sans privilèges)
         # ==========================================
-        main_layout.addWidget(self.creer_zone_vide(" Zone 11 : Vérification des mises à jour et paquets "))
-        main_layout.addWidget(self.creer_zone_vide(" Zone 12 : Journal d'exécution direct "))
-        main_layout.addWidget(self.creer_zone_vide(" Zone 13 : Détection des signes d'alerte système "))
+        self.group_zone11 = QGroupBox(" Zone 11 : Vérification des mises à jour et paquets ")
+        layout_zone11 = QHBoxLayout()
+
+        lbl_kmaj = QLabel("Contrôles APT/DPKG : listes de paquets, mises à jour disponibles, paquets brisés et orphelins.")
+        self.btn_open_kmaj = QPushButton("Ouvrir la vérification des mises à jour")
+        self.btn_open_kmaj.clicked.connect(self.ouvrir_kmaj)
+
+        layout_zone11.addWidget(lbl_kmaj, stretch=1)
+        layout_zone11.addWidget(self.btn_open_kmaj)
+        layout_zone11.setContentsMargins(9, 2, 9, 2)
+        self.group_zone11.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.group_zone11.setLayout(layout_zone11)
+        main_layout.addWidget(self.group_zone11)
+
+        # ==========================================
+        # ZONE 12 : Journal d'exécution direct
+        # (hors zone verrouillée : fonctionne sans privilèges)
+        # ==========================================
+        self.group_zone12 = QGroupBox(" Zone 12 : Journal d'exécution direct ")
+        layout_zone12 = QHBoxLayout()
+
+        lbl_kjournal = QLabel("Journal système en direct (journalctl) : filtres, priorités, colorisation des erreurs, export.")
+        self.btn_open_kjournal = QPushButton("Ouvrir le journal direct")
+        self.btn_open_kjournal.clicked.connect(self.ouvrir_kjournal)
+
+        layout_zone12.addWidget(lbl_kjournal, stretch=1)
+        layout_zone12.addWidget(self.btn_open_kjournal)
+        layout_zone12.setContentsMargins(9, 2, 9, 2)
+        self.group_zone12.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.group_zone12.setLayout(layout_zone12)
+        main_layout.addWidget(self.group_zone12)
+
+        # ==========================================
+        # ZONE 13 : Détection des signes d'alerte système
+        # (hors zone verrouillée : fonctionne sans privilèges)
+        # ==========================================
+        self.group_zone13 = QGroupBox(" Zone 13 : Détection des signes d'alerte système ")
+        layout_zone13 = QHBoxLayout()
+
+        lbl_kalertes = QLabel("Scan du journal et du matériel : unités en échec, erreurs disques, OOM, surchauffe, partitions saturées.")
+        self.btn_open_kalertes = QPushButton("Scanner les signes d'alerte")
+        self.btn_open_kalertes.clicked.connect(self.ouvrir_kalertes)
+
+        layout_zone13.addWidget(lbl_kalertes, stretch=1)
+        layout_zone13.addWidget(self.btn_open_kalertes)
+        layout_zone13.setContentsMargins(9, 2, 9, 2)
+        self.group_zone13.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.group_zone13.setLayout(layout_zone13)
+        main_layout.addWidget(self.group_zone13)
 
         # ==========================================
         # ZONE 14 : Décompte de temps des opérations
@@ -3063,6 +3972,71 @@ class KDiskApp(QMainWindow):
         self.timer_decompte.timeout.connect(self.tic_decompte)
         self.secondes_restantes = 0
 
+        # ==========================================
+        # ZONE 15 : Surveillance des capteurs et vitesse du CPU
+        # (embarquée : les données s'affichent directement dans cette
+        # fenêtre, rafraîchissement automatique sans privilèges)
+        # ==========================================
+        self.group_zone15 = QGroupBox(" Zone 15 : Surveillance des capteurs et vitesse du CPU (temps réel) ")
+        layout_zone15 = QVBoxLayout()
+
+        layout_z15_ctrl = QHBoxLayout()
+        self.btn_capteurs = QPushButton("▶ Démarrer la surveillance")
+        self.btn_capteurs.clicked.connect(self.basculer_surveillance_capteurs)
+
+        self.combo_capteurs_intervalle = QComboBox()
+        self.combo_capteurs_intervalle.addItems(["1 s", "2 s", "5 s"])
+
+        self.btn_capteurs_export = QPushButton("Exporter (CSV)")
+        self.btn_capteurs_export.clicked.connect(self.exporter_capteurs_csv)
+
+        self.lbl_capteurs_etat = QLabel("Surveillance arrêtée — aucune mesure.")
+        self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
+
+        layout_z15_ctrl.addWidget(self.btn_capteurs)
+        layout_z15_ctrl.addWidget(QLabel("Intervalle :"))
+        layout_z15_ctrl.addWidget(self.combo_capteurs_intervalle)
+        layout_z15_ctrl.addWidget(self.btn_capteurs_export)
+        layout_z15_ctrl.addWidget(self.lbl_capteurs_etat, stretch=1)
+        layout_zone15.addLayout(layout_z15_ctrl)
+
+        self.table_capteurs = QTableWidget(0, 6)
+        self.table_capteurs.setHorizontalHeaderLabels(
+            ["Capteur", "Type", "Valeur", "Unité", "Limite", "État"])
+        self.table_capteurs.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table_capteurs.horizontalHeader().setStretchLastSection(True)
+        self.table_capteurs.verticalHeader().setVisible(False)
+        self.table_capteurs.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_capteurs.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table_capteurs.setAlternatingRowColors(True)
+        self.table_capteurs.setMinimumHeight(200)
+        self.table_capteurs.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 4px;
+                gridline-color: #3e4451;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #21252b;
+                color: #00bcd4;
+                border: 1px solid #3e4451;
+                padding: 4px;
+                font-weight: bold;
+            }
+        """)
+        layout_zone15.addWidget(self.table_capteurs)
+
+        self.group_zone15.setLayout(layout_zone15)
+        main_layout.addWidget(self.group_zone15)
+
+        self.timer_capteurs = QTimer(self)
+        self.timer_capteurs.timeout.connect(self.maj_capteurs)
+        self.combo_capteurs_intervalle.currentIndexChanged.connect(self.changer_intervalle_capteurs)
+        self.cpu_temps_precedent = None
+
         main_layout.addStretch(1)
         self.set_zones_enabled(False)
 
@@ -3080,19 +4054,6 @@ class KDiskApp(QMainWindow):
     def set_zones_enabled(self, enabled):
         for zone in self.zones_privilegiees:
             zone.setEnabled(enabled)
-
-    def creer_zone_vide(self, titre):
-        """Crée un QGroupBox réservé à une fonctionnalité à venir."""
-        groupe = QGroupBox(titre)
-        lay = QHBoxLayout(groupe)
-        lbl = QLabel("Fonctionnalité en préparation — disponible dans une prochaine version.")
-        lbl.setStyleSheet("color: #606b7d; font-style: italic;")
-        lbl.setAlignment(Qt.AlignCenter)
-        lay.addWidget(lbl)
-        lay.setContentsMargins(9, 2, 9, 2)
-        groupe.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        groupe.setLayout(lay)
-        return groupe
 
     # ==========================================
     # ZONE 1 : CONNEXION SU
@@ -3458,6 +4419,102 @@ udevadm settle
         self.lbl_countdown_val.setText(f"{minutes:02d}:{secondes:02d}")
         self.secondes_restantes -= 1
 
+    # ==========================================
+    # ZONE 15 : SURVEILLANCE DES CAPTEURS ET CPU (TEMPS RÉEL)
+    # ==========================================
+    def intervalle_capteurs_ms(self):
+        return [1000, 2000, 5000][self.combo_capteurs_intervalle.currentIndex()]
+
+    def changer_intervalle_capteurs(self):
+        if self.timer_capteurs.isActive():
+            self.timer_capteurs.start(self.intervalle_capteurs_ms())
+
+    def basculer_surveillance_capteurs(self):
+        if self.timer_capteurs.isActive():
+            self.timer_capteurs.stop()
+            self.btn_capteurs.setText("▶ Démarrer la surveillance")
+            self.lbl_capteurs_etat.setText("Surveillance arrêtée.")
+            self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
+        else:
+            self.timer_capteurs.start(self.intervalle_capteurs_ms())
+            self.maj_capteurs()
+
+    def temps_cpu(self):
+        """(inactif, total) depuis /proc/stat, ou None si indisponible."""
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                valeurs = [int(v) for v in f.readline().split()[1:]]
+        except (OSError, ValueError, IndexError):
+            return None
+        inactif = valeurs[3] + (valeurs[4] if len(valeurs) > 4 else 0)
+        return inactif, sum(valeurs)
+
+    def maj_capteurs(self):
+        lignes = []
+
+        for i, mhz in enumerate(frequences_cpu()):
+            lignes.append((f"CPU cœur {i}", "Fréquence", f"{mhz:.0f}", "MHz", "—", "—"))
+
+        temps = self.temps_cpu()
+        if temps and self.cpu_temps_precedent:
+            idle_avant, total_avant = self.cpu_temps_precedent
+            inactif, total = temps
+            allocation = total - total_avant
+            if allocation > 0:
+                charge = 100.0 * (1.0 - (inactif - idle_avant) / allocation)
+                etat_charge = "À surveiller" if charge >= 90 else ("ALERTE" if charge >= 99.5 else "OK")
+                lignes.append(("Charge CPU (tous cœurs)", "Charge",
+                               f"{charge:.0f}", "%", "—", etat_charge))
+        self.cpu_temps_precedent = temps
+
+        capteurs = mesures_hwmon()
+        for capteur in capteurs:
+            lignes.append((capteur["nom"], capteur["type"], capteur["valeur"],
+                           capteur["unite"], capteur["limite"], capteur["etat"]))
+
+        couleurs_etat = {"OK": "#98c379", "À surveiller": "#e5c07b", "ALERTE": "#e06c75"}
+        self.table_capteurs.setRowCount(len(lignes))
+        for r, entree in enumerate(lignes):
+            for c, contenu in enumerate(entree):
+                item = QTableWidgetItem(str(contenu))
+                if c == 5 and contenu in couleurs_etat:
+                    item.setForeground(QBrush(QColor(couleurs_etat[contenu])))
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.table_capteurs.setItem(r, c, item)
+
+        self.lbl_capteurs_etat.setText(
+            f"Dernière mesure : {datetime.now().strftime('%H:%M:%S')} — "
+            f"{len(frequences_cpu())} cœur(s) CPU, {len(capteurs)} capteur(s) de la carte mère.")
+        self.lbl_capteurs_etat.setStyleSheet("color: #98c379; font-style: italic;")
+
+    def exporter_capteurs_csv(self):
+        if self.table_capteurs.rowCount() == 0:
+            QMessageBox.information(
+                self, "Aucune mesure",
+                "Démarrez la surveillance pour collecter des mesures avant l'export.")
+            return
+        chemin, _ = QFileDialog.getSaveFileName(
+            self, "Exporter les capteurs (CSV)",
+            os.path.join(bureau_utilisateur(),
+                         f"karediag_capteurs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+            "Fichiers CSV (*.csv)")
+        if not chemin:
+            return
+        try:
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write("Capteur;Type;Valeur;Unite;Limite;Etat\n")
+                for r in range(self.table_capteurs.rowCount()):
+                    valeurs = []
+                    for c in range(self.table_capteurs.columnCount()):
+                        item = self.table_capteurs.item(r, c)
+                        valeurs.append(item.text() if item else "")
+                    f.write(";".join(valeurs) + "\n")
+            QMessageBox.information(self, "Export réalisé",
+                                    f"Les données ont été enregistrées ici :\n{chemin}")
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur",
+                                 f"Erreur lors de l'export :\n{e}")
+
     def afficher_rapport(self, type_rapport):
         disque = self.extraire_chemin_disque()
         if not disque:
@@ -3617,6 +4674,18 @@ Date / Contexte : Analyse Kaisen Linux - KareDiag
     def ouvrir_kcomparaison(self):
         self.fenetre_kcomparaison = KAuditCompareWindow(self)
         self.fenetre_kcomparaison.exec_()
+
+    def ouvrir_kmaj(self):
+        self.fenetre_kmaj = KMAJWindow(self)
+        self.fenetre_kmaj.exec_()
+
+    def ouvrir_kjournal(self):
+        self.fenetre_kjournal = KJournalWindow(self)
+        self.fenetre_kjournal.exec_()
+
+    def ouvrir_kalertes(self):
+        self.fenetre_kalertes = KAlertesWindow(self)
+        self.fenetre_kalertes.exec_()
 
     def ouvrir_fenetre_rapport(self, titre, texte):
         self.fenetre_rapport = RapportWindow(titre, texte)
