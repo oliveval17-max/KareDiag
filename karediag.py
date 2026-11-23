@@ -792,6 +792,19 @@ def unite_faux_positif_live(nom_unite):
     base = os.path.basename((nom_unite or "").strip().lower())
     return base.startswith(UNITS_FAUX_POSITIF_LIVE)
 
+SUFFIXES_UNITE_SYSTEMD = (".service", ".timer", ".socket", ".mount", ".slice",
+                          ".scope", ".target", ".device", ".automount", ".path")
+
+
+def nom_unite_systemd(ligne):
+    """Extrait le nom d'unité d'une ligne de « systemctl list-units »,
+    quel que soit le symbole de listage (●, *, ✱, ...) qui la précède."""
+    for champ in ligne.replace("\u25cf", " ").lstrip("*✱∗●◉∙·◦○").split():
+        if champ.endswith(SUFFIXES_UNITE_SYSTEMD):
+            return champ
+    champs = ligne.split()
+    return champs[0] if champs else ligne
+
 
 class KAlertesWindow(QDialog):
     """Zone 13 : scan des signes d'alerte du système avec sévérité."""
@@ -951,9 +964,10 @@ class KAlertesWindow(QDialog):
             self.log("[INFO] systemctl indisponible ou inaccessible.")
             return
         unites = [l.strip() for l in sortie.splitlines() if " failed " in l]
-        unites = [u.replace("\u25cf", " ").strip() for u in unites]
+        unites = [u.replace("\u25cf", " ").lstrip("*✱∗●◉∙·◦○ ").strip()
+                  for u in unites]
         propres = [u for u in unites
-                   if not unite_faux_positif_live(u.split()[0] if u.split() else u)]
+                   if not unite_faux_positif_live(nom_unite_systemd(u))]
         ignores = len(unites) - len(propres)
         if ignores:
             if est_session_live():
