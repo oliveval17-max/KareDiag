@@ -768,6 +768,8 @@ class KJournalWindow(QDialog):
 UNITS_FAUX_POSITIF_LIVE = ("casper", "live-boot", "live-tools", "livesys")
 MOTIF_FAUX_POSITIF_LIVE = re.compile(
     r"\b(casper|live-boot|livesys)\b", re.IGNORECASE)
+MOTIF_BENIN_NOYAU = re.compile(
+    r"\bnvme\d+\s*:.*shutdown timeout set to \d+ seconds", re.IGNORECASE)
 
 
 def est_session_live():
@@ -998,9 +1000,16 @@ class KAlertesWindow(QDialog):
         if not ok:
             self.log("[INFO] Journal noyau inaccessible sans privilèges.")
             return
+        brutes = sortie.splitlines()
+        lignes = [l for l in brutes
+                  if not MOTIF_BENIN_NOYAU.search(l)]
+        ignores = len(brutes) - len(lignes)
+        if ignores:
+            self.log(f"[INFO] {ignores} message(s) noyau informatif(s) ignoré(s) "
+                     "(réglage annoncé par le pilote, pas une erreur).")
         interroges = 0
         for libelle, motifs, critique in self.MOTIFS:
-            correspondances = [l for l in sortie.splitlines()
+            correspondances = [l for l in lignes
                                if any(re.search(m, l, re.IGNORECASE) for m in motifs)]
             if correspondances:
                 self.signaler(critique, f"{libelle} — {len(correspondances)} entrée(s) :")
@@ -1014,7 +1023,25 @@ class KAlertesWindow(QDialog):
         self.log("[*] Capteurs : températures et alarmes matérielles...")
         capteurs = mesures_hwmon()
         alertes = 0
+        ventilateurs_a_zero = []
+        for c in capteurs:
+            if c["type"] != "Ventilateur":
+                continue
+            if c["etat"] == "—":
+                ventilateurs_a_zero.append(c)
+                continue
+            try:
+                if float(c["valeur"]) == 0:
+                    ventilateurs_a_zero.append(c)
+            except ValueError:
+                pass
+        if ventilateurs_a_zero:
+            noms = ", ".join(c["nom"] for c in ventilateurs_a_zero)
+            self.log(f"[INFO] {len(ventilateurs_a_zero)} ventilateur(s) à 0 tr/min "
+                     f"ignoré(s) ({noms}) : prise vide ou ventilateur hors tension.")
         for capteur in capteurs:
+            if capteur in ventilateurs_a_zero:
+                continue
             if capteur["etat"] != "OK":
                 alertes += 1
                 texte = (f"{capteur['source']} : {capteur['nom']} = "
