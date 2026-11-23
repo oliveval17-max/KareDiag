@@ -1168,7 +1168,295 @@ def frequences_cpu():
     return freqs
 
 
+MOTIF_CAPTEUR_SENSORS = re.compile(
+    r"^(.+?):\s+\+?(-?[\d.]+)\s*(°C|C|RPM|mV|V|A|W)\b")
+
+
+def capteurs_depuis_sensors(texte=None):
+    """Repli : lecture de la commande `sensors` (lm-sensors) pour les
+    ventilateurs, tensions, courants et puissances non exposés par hwmon.
+    Détectables après configuration par « sudo sensors-detect »."""
+    if texte is None:
+        if shutil.which("sensors") is None:
+            return []
+        try:
+            res = subprocess.run(["sensors"], capture_output=True, text=True, timeout=10)
+        except Exception:
+            return []
+        texte = res.stdout
+    capteurs = []
+    puce = ""
+    for brut in (texte or "").splitlines():
+        ligne = brut.strip()
+        if not ligne:
+            puce = ""
+            continue
+        if not brut.startswith((" ", "\t")) and ":" not in ligne:
+            puce = ligne
+            continue
+        m = MOTIF_CAPTEUR_SENSORS.match(ligne)
+        if not m:
+            continue
+        nom, valeur, unite = m.group(1).strip(), float(m.group(2)), m.group(3)
+        if unite == "RPM":
+            capteurs.append({
+                "source": puce or "sensors", "type": "Ventilateur", "nom": nom,
+                "valeur": f"{valeur:.0f}", "unite": "tr/min", "limite": "—",
+                "etat": "OK" if valeur > 0 else "À surveiller"})
+        elif unite in ("V", "mV"):
+            if unite == "mV":
+                valeur /= 1000
+            capteurs.append({
+                "source": puce or "sensors", "type": "Tension", "nom": nom,
+                "valeur": f"{valeur:.3f}", "unite": "V", "limite": "—", "etat": "OK"})
+        elif unite == "A":
+            capteurs.append({
+                "source": puce or "sensors", "type": "Courant", "nom": nom,
+                "valeur": f"{valeur:.3f}", "unite": "A", "limite": "—", "etat": "OK"})
+        elif unite == "W":
+            capteurs.append({
+                "source": puce or "sensors", "type": "Puissance", "nom": nom,
+                "valeur": f"{valeur:.2f}", "unite": "W", "limite": "—", "etat": "OK"})
+        elif unite in ("°C", "C"):
+            capteurs.append({
+                "source": puce or "sensors", "type": "Température", "nom": nom,
+                "valeur": f"{valeur:.1f}", "unite": "°C", "limite": "—", "etat": "OK"})
+    return capteurs
+
+
 # ============================================================
+# KareDiag - Zone 15 (fenêtre) : surveillance des capteurs et
+# vitesse du CPU en temps réel (tableau complet + export CSV)
+# ============================================================
+class KCapteursWindow(QDialog):
+    """Zone 15 : mesures en direct des fréquences CPU, de la charge
+    et des capteurs de la carte mère (températures, ventilateurs,
+    tensions, courants, puissances)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("KareDiag - Surveillance des capteurs et CPU (Zone 15)")
+        self.resize(900, 640)
+        self.setMinimumSize(780, 560)
+
+        self.setStyleSheet("""
+            QDialog { background-color: #181a1f; }
+            QGroupBox {
+                color: #00bcd4;
+                font-weight: bold;
+                font-size: 13px;
+                border: 2px solid #3e4451;
+                border-radius: 8px;
+                margin-top: 12px;
+                background-color: rgba(33, 37, 43, 210);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+            QPushButton {
+                background-color: #2188ff;
+                color: white;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover { background-color: #006fe6; }
+            QPushButton:disabled { background-color: #3b4252; color: #606b7d; }
+            QLabel, QComboBox { color: #abb2bf; font-size: 12px; }
+            QComboBox {
+                background-color: #21252b;
+                border: 1px solid #4b5263;
+                border-radius: 4px;
+                padding: 4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        titre = QLabel("KareDiag - Surveillance des capteurs et vitesse du CPU (temps réel)")
+        titre.setStyleSheet("font-size: 14px; font-weight: bold; color: #00bcd4;")
+        titre.setAlignment(Qt.AlignCenter)
+        layout.addWidget(titre)
+
+        note = QLabel(
+            "Toutes les mesures s'affichent ici sans privilèges. Changez "
+            "l'intervalle de rafraîchissement à tout moment ; l'export CSV "
+            "enregistre le dernier instantané affiché."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        layout_z15_ctrl = QHBoxLayout()
+        self.btn_capteurs = QPushButton("▶ Démarrer la surveillance")
+        self.btn_capteurs.clicked.connect(self.basculer_surveillance_capteurs)
+
+        self.combo_capteurs_intervalle = QComboBox()
+        self.combo_capteurs_intervalle.addItems(["1 s", "2 s", "5 s"])
+
+        self.btn_capteurs_export = QPushButton("Exporter (CSV)")
+        self.btn_capteurs_export.clicked.connect(self.exporter_capteurs_csv)
+
+        self.lbl_capteurs_etat = QLabel("Surveillance arrêtée — aucune mesure.")
+        self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
+
+        layout_z15_ctrl.addWidget(self.btn_capteurs)
+        layout_z15_ctrl.addWidget(QLabel("Intervalle :"))
+        layout_z15_ctrl.addWidget(self.combo_capteurs_intervalle)
+        layout_z15_ctrl.addWidget(self.btn_capteurs_export)
+        layout_z15_ctrl.addWidget(self.lbl_capteurs_etat, stretch=1)
+        layout.addLayout(layout_z15_ctrl)
+
+        self.table_capteurs = QTableWidget(0, 6)
+        self.table_capteurs.setHorizontalHeaderLabels(
+            ["Capteur", "Type", "Valeur", "Unité", "Limite", "État"])
+        self.table_capteurs.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table_capteurs.horizontalHeader().setStretchLastSection(True)
+        self.table_capteurs.verticalHeader().setVisible(False)
+        self.table_capteurs.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_capteurs.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table_capteurs.setAlternatingRowColors(True)
+        self.table_capteurs.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 4px;
+                gridline-color: #3e4451;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #21252b;
+                color: #00bcd4;
+                border: 1px solid #3e4451;
+                padding: 4px;
+                font-weight: bold;
+            }
+        """)
+        layout.addWidget(self.table_capteurs)
+
+        self.timer_capteurs = QTimer(self)
+        self.timer_capteurs.timeout.connect(self.maj_capteurs)
+        self.combo_capteurs_intervalle.currentIndexChanged.connect(self.changer_intervalle_capteurs)
+        self.cpu_temps_precedent = None
+
+    def intervalle_capteurs_ms(self):
+        return [1000, 2000, 5000][self.combo_capteurs_intervalle.currentIndex()]
+
+    def changer_intervalle_capteurs(self):
+        if self.timer_capteurs.isActive():
+            self.timer_capteurs.start(self.intervalle_capteurs_ms())
+
+    def basculer_surveillance_capteurs(self):
+        if self.timer_capteurs.isActive():
+            self.timer_capteurs.stop()
+            self.btn_capteurs.setText("▶ Démarrer la surveillance")
+            self.lbl_capteurs_etat.setText("Surveillance arrêtée.")
+            self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
+        else:
+            self.timer_capteurs.start(self.intervalle_capteurs_ms())
+            self.maj_capteurs()
+
+    def temps_cpu(self):
+        """(inactif, total) depuis /proc/stat, ou None si indisponible."""
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                valeurs = [int(v) for v in f.readline().split()[1:]]
+        except (OSError, ValueError, IndexError):
+            return None
+        inactif = valeurs[3] + (valeurs[4] if len(valeurs) > 4 else 0)
+        return inactif, sum(valeurs)
+
+    def maj_capteurs(self):
+        lignes = []
+
+        for i, mhz in enumerate(frequences_cpu()):
+            lignes.append((f"CPU cœur {i}", "Fréquence", f"{mhz:.0f}", "MHz", "—", "—"))
+
+        temps = self.temps_cpu()
+        if temps and self.cpu_temps_precedent:
+            idle_avant, total_avant = self.cpu_temps_precedent
+            inactif, total = temps
+            allocation = total - total_avant
+            if allocation > 0:
+                charge = 100.0 * (1.0 - (inactif - idle_avant) / allocation)
+                etat_charge = "À surveiller" if charge >= 90 else ("ALERTE" if charge >= 99.5 else "OK")
+                lignes.append(("Charge CPU (tous cœurs)", "Charge",
+                               f"{charge:.0f}", "%", "—", etat_charge))
+        self.cpu_temps_precedent = temps
+
+        capteurs = mesures_hwmon()
+        types_lus = {c["type"] for c in capteurs}
+        repli = capteurs_depuis_sensors()
+        if "Ventilateur" not in types_lus:
+            capteurs += [c for c in repli if c["type"] == "Ventilateur"]
+        if "Tension" not in types_lus:
+            capteurs += [c for c in repli if c["type"] == "Tension"]
+
+        conseils = []
+        if not any(c["type"] == "Ventilateur" for c in capteurs):
+            conseils.append("ventilateurs non détectés — lancez « sudo sensors-detect » puis redémarrez")
+        if not any(c["type"] == "Tension" for c in capteurs):
+            conseils.append("tensions CPU non exposées par cette carte mère")
+
+        for capteur in capteurs:
+            lignes.append((capteur["nom"], capteur["type"], capteur["valeur"],
+                           capteur["unite"], capteur["limite"], capteur["etat"]))
+
+        couleurs_etat = {"OK": "#98c379", "À surveiller": "#e5c07b", "ALERTE": "#e06c75"}
+        self.table_capteurs.setRowCount(len(lignes))
+        for r, entree in enumerate(lignes):
+            for c, contenu in enumerate(entree):
+                item = QTableWidgetItem(str(contenu))
+                if c == 5 and contenu in couleurs_etat:
+                    item.setForeground(QBrush(QColor(couleurs_etat[contenu])))
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.table_capteurs.setItem(r, c, item)
+
+        texte_etat = (f"Dernière mesure : {datetime.now().strftime('%H:%M:%S')} — "
+                      f"{len(frequences_cpu())} cœur(s) CPU, {len(capteurs)} capteur(s) de la carte mère.")
+        if conseils:
+            texte_etat += "  [i] " + ". ".join(conseils) + "."
+        self.lbl_capteurs_etat.setText(texte_etat)
+        self.lbl_capteurs_etat.setStyleSheet("color: #98c379; font-style: italic;")
+
+    def exporter_capteurs_csv(self):
+        if self.table_capteurs.rowCount() == 0:
+            QMessageBox.information(
+                self, "Aucune mesure",
+                "Démarrez la surveillance pour collecter des mesures avant l'export.")
+            return
+        chemin, _ = QFileDialog.getSaveFileName(
+            self, "Exporter les capteurs (CSV)",
+            os.path.join(bureau_utilisateur(),
+                         f"karediag_capteurs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
+            "Fichiers CSV (*.csv)")
+        if not chemin:
+            return
+        try:
+            with open(chemin, "w", encoding="utf-8") as f:
+                f.write("Capteur;Type;Valeur;Unite;Limite;Etat\n")
+                for r in range(self.table_capteurs.rowCount()):
+                    valeurs = []
+                    for c in range(self.table_capteurs.columnCount()):
+                        item = self.table_capteurs.item(r, c)
+                        valeurs.append(item.text() if item else "")
+                    f.write(";".join(valeurs) + "\n")
+            QMessageBox.information(self, "Export réalisé",
+                                    f"Les données ont été enregistrées ici :\n{chemin}")
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur",
+                                 f"Erreur lors de l'export :\n{e}")
+
+    def closeEvent(self, event):
+        self.timer_capteurs.stop()
+        self.btn_capteurs.setText("▶ Démarrer la surveillance")
+        self.lbl_capteurs_etat.setText("Surveillance arrêtée.")
+        self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
+        event.accept()
+
+
 # KareDiag - Audit global : score de santé, recommandations,
 # export HTML, historique (portage corrigé d'OmniAudit)
 # ============================================================
@@ -3663,7 +3951,10 @@ class KDiskApp(QMainWindow):
         zone_defilable.setFrameShape(QFrame.NoFrame)
 
         central_widget = QWidget()
-        central_widget.setStyleSheet("QWidget { background-color: #181a1f; }")
+        central_widget.setObjectName("zone_defilement")
+        # Sélecteur par identifiant : uniquement ce conteneur est recoloré,
+        # sans écraser le style bleu des boutons des zones filles.
+        central_widget.setStyleSheet("#zone_defilement { background-color: #181a1f; }")
         zone_defilable.setWidget(central_widget)
         self.setCentralWidget(zone_defilable)
         main_layout = QVBoxLayout(central_widget)
@@ -3983,68 +4274,22 @@ class KDiskApp(QMainWindow):
 
         # ==========================================
         # ZONE 15 : Surveillance des capteurs et vitesse du CPU
-        # (embarquée : les données s'affichent directement dans cette
-        # fenêtre, rafraîchissement automatique sans privilèges)
+        # (présentation compacte : les données complètes s'affichent
+        # dans une fenêtre dédiée ouverte par le bouton)
         # ==========================================
         self.group_zone15 = QGroupBox(" Zone 15 : Surveillance des capteurs et vitesse du CPU (temps réel) ")
-        layout_zone15 = QVBoxLayout()
+        layout_zone15 = QHBoxLayout()
 
-        layout_z15_ctrl = QHBoxLayout()
-        self.btn_capteurs = QPushButton("▶ Démarrer la surveillance")
-        self.btn_capteurs.clicked.connect(self.basculer_surveillance_capteurs)
+        lbl_kcapteurs = QLabel("Fréquences par cœur, charge, températures, ventilateurs, tensions, courants et puissances — relevés en direct.")
+        self.btn_open_kcapteurs = QPushButton("▶ Démarrer la surveillance")
+        self.btn_open_kcapteurs.clicked.connect(self.ouvrir_kcapteurs)
 
-        self.combo_capteurs_intervalle = QComboBox()
-        self.combo_capteurs_intervalle.addItems(["1 s", "2 s", "5 s"])
-
-        self.btn_capteurs_export = QPushButton("Exporter (CSV)")
-        self.btn_capteurs_export.clicked.connect(self.exporter_capteurs_csv)
-
-        self.lbl_capteurs_etat = QLabel("Surveillance arrêtée — aucune mesure.")
-        self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
-
-        layout_z15_ctrl.addWidget(self.btn_capteurs)
-        layout_z15_ctrl.addWidget(QLabel("Intervalle :"))
-        layout_z15_ctrl.addWidget(self.combo_capteurs_intervalle)
-        layout_z15_ctrl.addWidget(self.btn_capteurs_export)
-        layout_z15_ctrl.addWidget(self.lbl_capteurs_etat, stretch=1)
-        layout_zone15.addLayout(layout_z15_ctrl)
-
-        self.table_capteurs = QTableWidget(0, 6)
-        self.table_capteurs.setHorizontalHeaderLabels(
-            ["Capteur", "Type", "Valeur", "Unité", "Limite", "État"])
-        self.table_capteurs.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table_capteurs.horizontalHeader().setStretchLastSection(True)
-        self.table_capteurs.verticalHeader().setVisible(False)
-        self.table_capteurs.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table_capteurs.setSelectionMode(QAbstractItemView.NoSelection)
-        self.table_capteurs.setAlternatingRowColors(True)
-        self.table_capteurs.setMinimumHeight(200)
-        self.table_capteurs.setStyleSheet("""
-            QTableWidget {
-                background-color: #1e1e1e;
-                color: #abb2bf;
-                border: 1px solid #3e4451;
-                border-radius: 4px;
-                gridline-color: #3e4451;
-                font-size: 11px;
-            }
-            QHeaderView::section {
-                background-color: #21252b;
-                color: #00bcd4;
-                border: 1px solid #3e4451;
-                padding: 4px;
-                font-weight: bold;
-            }
-        """)
-        layout_zone15.addWidget(self.table_capteurs)
-
+        layout_zone15.addWidget(lbl_kcapteurs, stretch=1)
+        layout_zone15.addWidget(self.btn_open_kcapteurs)
+        layout_zone15.setContentsMargins(9, 2, 9, 2)
+        self.group_zone15.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.group_zone15.setLayout(layout_zone15)
         main_layout.addWidget(self.group_zone15)
-
-        self.timer_capteurs = QTimer(self)
-        self.timer_capteurs.timeout.connect(self.maj_capteurs)
-        self.combo_capteurs_intervalle.currentIndexChanged.connect(self.changer_intervalle_capteurs)
-        self.cpu_temps_precedent = None
 
         main_layout.addStretch(1)
         self.set_zones_enabled(False)
@@ -4429,100 +4674,11 @@ udevadm settle
         self.secondes_restantes -= 1
 
     # ==========================================
-    # ZONE 15 : SURVEILLANCE DES CAPTEURS ET CPU (TEMPS RÉEL)
+    # ZONE 15 : OUVERTURE DE LA SURVEILLANCE
     # ==========================================
-    def intervalle_capteurs_ms(self):
-        return [1000, 2000, 5000][self.combo_capteurs_intervalle.currentIndex()]
-
-    def changer_intervalle_capteurs(self):
-        if self.timer_capteurs.isActive():
-            self.timer_capteurs.start(self.intervalle_capteurs_ms())
-
-    def basculer_surveillance_capteurs(self):
-        if self.timer_capteurs.isActive():
-            self.timer_capteurs.stop()
-            self.btn_capteurs.setText("▶ Démarrer la surveillance")
-            self.lbl_capteurs_etat.setText("Surveillance arrêtée.")
-            self.lbl_capteurs_etat.setStyleSheet("color: #606b7d; font-style: italic;")
-        else:
-            self.timer_capteurs.start(self.intervalle_capteurs_ms())
-            self.maj_capteurs()
-
-    def temps_cpu(self):
-        """(inactif, total) depuis /proc/stat, ou None si indisponible."""
-        try:
-            with open("/proc/stat", "r", encoding="utf-8") as f:
-                valeurs = [int(v) for v in f.readline().split()[1:]]
-        except (OSError, ValueError, IndexError):
-            return None
-        inactif = valeurs[3] + (valeurs[4] if len(valeurs) > 4 else 0)
-        return inactif, sum(valeurs)
-
-    def maj_capteurs(self):
-        lignes = []
-
-        for i, mhz in enumerate(frequences_cpu()):
-            lignes.append((f"CPU cœur {i}", "Fréquence", f"{mhz:.0f}", "MHz", "—", "—"))
-
-        temps = self.temps_cpu()
-        if temps and self.cpu_temps_precedent:
-            idle_avant, total_avant = self.cpu_temps_precedent
-            inactif, total = temps
-            allocation = total - total_avant
-            if allocation > 0:
-                charge = 100.0 * (1.0 - (inactif - idle_avant) / allocation)
-                etat_charge = "À surveiller" if charge >= 90 else ("ALERTE" if charge >= 99.5 else "OK")
-                lignes.append(("Charge CPU (tous cœurs)", "Charge",
-                               f"{charge:.0f}", "%", "—", etat_charge))
-        self.cpu_temps_precedent = temps
-
-        capteurs = mesures_hwmon()
-        for capteur in capteurs:
-            lignes.append((capteur["nom"], capteur["type"], capteur["valeur"],
-                           capteur["unite"], capteur["limite"], capteur["etat"]))
-
-        couleurs_etat = {"OK": "#98c379", "À surveiller": "#e5c07b", "ALERTE": "#e06c75"}
-        self.table_capteurs.setRowCount(len(lignes))
-        for r, entree in enumerate(lignes):
-            for c, contenu in enumerate(entree):
-                item = QTableWidgetItem(str(contenu))
-                if c == 5 and contenu in couleurs_etat:
-                    item.setForeground(QBrush(QColor(couleurs_etat[contenu])))
-                    item.setTextAlignment(Qt.AlignCenter)
-                self.table_capteurs.setItem(r, c, item)
-
-        self.lbl_capteurs_etat.setText(
-            f"Dernière mesure : {datetime.now().strftime('%H:%M:%S')} — "
-            f"{len(frequences_cpu())} cœur(s) CPU, {len(capteurs)} capteur(s) de la carte mère.")
-        self.lbl_capteurs_etat.setStyleSheet("color: #98c379; font-style: italic;")
-
-    def exporter_capteurs_csv(self):
-        if self.table_capteurs.rowCount() == 0:
-            QMessageBox.information(
-                self, "Aucune mesure",
-                "Démarrez la surveillance pour collecter des mesures avant l'export.")
-            return
-        chemin, _ = QFileDialog.getSaveFileName(
-            self, "Exporter les capteurs (CSV)",
-            os.path.join(bureau_utilisateur(),
-                         f"karediag_capteurs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"),
-            "Fichiers CSV (*.csv)")
-        if not chemin:
-            return
-        try:
-            with open(chemin, "w", encoding="utf-8") as f:
-                f.write("Capteur;Type;Valeur;Unite;Limite;Etat\n")
-                for r in range(self.table_capteurs.rowCount()):
-                    valeurs = []
-                    for c in range(self.table_capteurs.columnCount()):
-                        item = self.table_capteurs.item(r, c)
-                        valeurs.append(item.text() if item else "")
-                    f.write(";".join(valeurs) + "\n")
-            QMessageBox.information(self, "Export réalisé",
-                                    f"Les données ont été enregistrées ici :\n{chemin}")
-        except Exception as e:
-            QMessageBox.critical(self, "Erreur",
-                                 f"Erreur lors de l'export :\n{e}")
+    def ouvrir_kcapteurs(self):
+        self.fenetre_kcapteurs = KCapteursWindow(self)
+        self.fenetre_kcapteurs.exec_()
 
     def afficher_rapport(self, type_rapport):
         disque = self.extraire_chemin_disque()
