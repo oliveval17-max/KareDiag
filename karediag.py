@@ -765,6 +765,32 @@ class KJournalWindow(QDialog):
 # KareDiag - Zone 13 : détection des signes d'alerte système
 # (unités en échec, erreurs noyau, OOM, surchauffe, disques saturés)
 # ============================================================
+UNITS_FAUX_POSITIF_LIVE = ("casper", "live-boot", "live-tools", "livesys")
+MOTIF_FAUX_POSITIF_LIVE = re.compile(
+    r"\b(casper|live-boot|livesys)\b", re.IGNORECASE)
+
+
+def est_session_live():
+    """Détecte une session Live ISO (Kaisen sur clé USB, Mint Live, ...)
+    via les répertoires de montage d'initramfs ou la ligne de commande noyau."""
+    for marqueur in ("/run/live", "/run/casper", "/run/initramfs/live", "/run/miso"):
+        if os.path.isdir(marqueur):
+            return True
+    try:
+        with open("/proc/cmdline", "r", encoding="utf-8") as f:
+            cmdline = f.read().lower()
+    except OSError:
+        return False
+    return "boot=live" in cmdline or "boot=casper" in cmdline
+
+
+def unite_faux_positif_live(nom_unite):
+    """Un service est un faux positif Live ISO (casper-mdcheck, live-boot...)
+    si son nom commence par un des préfixes connus des outils de session live."""
+    base = os.path.basename((nom_unite or "").strip().lower())
+    return base.startswith(UNITS_FAUX_POSITIF_LIVE)
+
+
 class KAlertesWindow(QDialog):
     """Zone 13 : scan des signes d'alerte du système avec sévérité."""
     MOTIFS = [
@@ -887,6 +913,9 @@ class KAlertesWindow(QDialog):
         self.nb_avertissements = 0
         self.log(f"=== Scan des signes d'alerte du "
                  f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} ===\n")
+        if est_session_live():
+            self.log("[INFO] Session Live ISO détectée — les services "
+                     "casper/live-boot sont ignorés (sans gravité).\n")
 
         self.verifier_unites_echec()
         self.verifier_journal_erreurs()
@@ -920,10 +949,22 @@ class KAlertesWindow(QDialog):
             self.log("[INFO] systemctl indisponible ou inaccessible.")
             return
         unites = [l.strip() for l in sortie.splitlines() if " failed " in l]
-        if unites:
-            self.signaler(True, f"{len(unites)} unité(s) systemd en échec :")
-            for l in unites[:15]:
+        propres = [u for u in unites
+                   if not unite_faux_positif_live(u.split()[0] if u.split() else u)]
+        ignores = len(unites) - len(propres)
+        if ignores:
+            if est_session_live():
+                self.log(f"[INFO] {ignores} unité(s) Live ISO ignorée(s) : "
+                         "comportement normal sur une session live.")
+            else:
+                self.log(f"[INFO] {ignores} unité(s) Live ISO ignorée(s) : "
+                         "services de session live sans gravité.")
+        if propres:
+            self.signaler(True, f"{len(propres)} unité(s) systemd en échec :")
+            for l in propres[:15]:
                 self.log("   " + l)
+        elif unites:
+            self.log("[OK] Seules des unités de Live ISO sont en échec — sans gravité.")
         else:
             self.log("[OK] Aucune unité systemd en échec.")
 
@@ -935,7 +976,12 @@ class KAlertesWindow(QDialog):
         if not ok:
             self.log("[INFO] Journal système inaccessible sans privilèges (scan partiel).")
             return
-        lignes = sortie.splitlines()
+        brutes = sortie.splitlines()
+        lignes = [l for l in brutes if not MOTIF_FAUX_POSITIF_LIVE.search(l)]
+        ignores = len(brutes) - len(lignes)
+        if ignores:
+            self.log(f"[INFO] {ignores} entrée(s) Live ISO ignorée(s) "
+                     "(casper/live-boot : normal sur un système live).")
         if lignes:
             self.signaler(False, f"{len(lignes)} entrée(s) de niveau ERREUR depuis le démarrage :")
             for l in lignes[-30:]:
