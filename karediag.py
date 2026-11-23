@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QMessageBox,
     QTextEdit, QDialog, QFileDialog, QStackedWidget, QSizePolicy,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView
+    QAbstractItemView, QScrollArea, QFrame
 )
 from PyQt5.QtCore import Qt, QTimer, QProcess
 from PyQt5.QtGui import QColor, QBrush
@@ -604,7 +604,6 @@ class KJournalWindow(QDialog):
         self.btn_export = QPushButton("Sauvegarder le journal")
         self.btn_export.clicked.connect(self.sauvegarder)
         self.btn_vider = QPushButton("Vider l'affichage")
-        self.btn_vider.clicked.connect(self.log_text.clear)
 
         btn_frame.addWidget(self.btn_suivi)
         btn_frame.addWidget(self.btn_pause)
@@ -632,6 +631,7 @@ class KJournalWindow(QDialog):
         self.en_pause = False
         self.file_pause = []
         self.couleur_normale = QColor("#00ff00")
+        self.btn_vider.clicked.connect(self.log_text.clear)
 
     def log(self, message, couleur=None):
         if couleur is not None:
@@ -3617,7 +3617,8 @@ class KDiskApp(QMainWindow):
         if est_root():
             titre_fenetre += "  —  [🛡️ Mode Administrateur]"
         self.setWindowTitle(titre_fenetre)
-        self.resize(980, 1040)
+        hauteur_ecran = QApplication.primaryScreen().availableGeometry().height()
+        self.resize(980, min(1040, int(hauteur_ecran * 0.93)))
 
         self.setStyleSheet("""
             QMainWindow { background-color: #181a1f; }
@@ -3655,8 +3656,16 @@ class KDiskApp(QMainWindow):
             }
         """)
 
+        # Zone de défilement : toutes les zones restent accessibles,
+        # même sur les écrans où la fenêtre complète est plus haute que l'écran.
+        zone_defilable = QScrollArea()
+        zone_defilable.setWidgetResizable(True)
+        zone_defilable.setFrameShape(QFrame.NoFrame)
+
         central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        central_widget.setStyleSheet("QWidget { background-color: #181a1f; }")
+        zone_defilable.setWidget(central_widget)
+        self.setCentralWidget(zone_defilable)
         main_layout = QVBoxLayout(central_widget)
 
         self.zones_privilegiees = []
@@ -3812,29 +3821,29 @@ class KDiskApp(QMainWindow):
         # ZONE 7 : Partitionnement et Formatage
         # ==========================================
         self.group_zone7 = QGroupBox(" Zone 7 : Partitionnement et Formatage ")
-        layout_zone7 = QVBoxLayout()
+        layout_zone7 = QHBoxLayout()
 
-        layout_zone7_btns = QHBoxLayout()
         self.btn_del_part = QPushButton("Supprimer toutes les partitions")
         self.btn_del_part.setStyleSheet("background-color: #d16969;")
         self.btn_del_part.clicked.connect(self.supprimer_partitions)
 
         self.combo_format = QComboBox()
         self.combo_format.addItems(["ext4", "NTFS", "FAT32"])
+        self.combo_format.setFixedWidth(80)
 
         self.btn_format = QPushButton("Formater")
+        self.btn_format.setFixedWidth(90)
         self.btn_format.clicked.connect(self.lancer_formatage)
-
-        layout_zone7_btns.addWidget(self.btn_del_part)
-        layout_zone7_btns.addWidget(QLabel("Format :"))
-        layout_zone7_btns.addWidget(self.combo_format)
-        layout_zone7_btns.addWidget(self.btn_format)
 
         self.lbl_warning_format = QLabel("Êtes vous certain de la sélection du disque ?")
         self.lbl_warning_format.setStyleSheet("font-weight: bold; color: #e5c07b;")
 
-        layout_zone7.addLayout(layout_zone7_btns)
-        layout_zone7.addWidget(self.lbl_warning_format)
+        layout_zone7.addWidget(self.btn_del_part)
+        layout_zone7.addWidget(QLabel("Format :"))
+        layout_zone7.addWidget(self.combo_format)
+        layout_zone7.addWidget(self.btn_format)
+        layout_zone7.addWidget(self.lbl_warning_format, stretch=1)
+        layout_zone7.setContentsMargins(9, 2, 9, 2)
         self.group_zone7.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.group_zone7.setLayout(layout_zone7)
         main_layout.addWidget(self.group_zone7)
