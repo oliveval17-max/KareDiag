@@ -1149,7 +1149,65 @@ def mesures_hwmon():
                 "etat": capteur_etat(alarme, None),
             })
 
-    return capteurs
+    return affiner_capteurs_ite(capteurs)
+
+
+# Libellés et échelles de la puce ITE IT8620E relevés sur les cartes
+# Gigabyte série H97 (configurations lm-sensors de référence) :
+# canal -> (libellé, ratio de conversion, tension nominale en V)
+RAILS_ITE_8620 = {
+    "in0": ("CPU Vcore", 1.0, 0.8),
+    "in1": ("+3.3V", 1.68, 3.3),
+    "in2": ("+12V", 6.0, 12.0),
+    "in3": ("+5V", 2.5, 5.0),
+    "in4": ("+3.3V", 1.649, 3.3),
+    "in5": ("CPU VRIN", 0.99, 1.7),
+    "in6": ("VDRAM", 1.0, 1.5),
+}
+
+
+def affiner_capteurs_ite(capteurs):
+    """Applique les libellés et ratios de la puce ITE IT8620E (Gigabyte H97).
+
+    Un canal converti n'est étiqueté que si le résultat reste à ±10 % de sa
+    tension nominale ; sinon la lecture brute est conservée sous forme
+    « inN (brute) ». Retire les sondes non connectées (lecture fantôme
+    -128 °C) et neutralise l'état des ventilateurs à l'arrêt.
+    """
+    resultats = []
+    for capteur in capteurs:
+        if capteur["type"] == "Température":
+            try:
+                if float(capteur["valeur"]) <= -55:
+                    continue
+            except ValueError:
+                pass
+            resultats.append(capteur)
+            continue
+        if capteur["type"] == "Tension":
+            nom = capteur["nom"]
+            definition = RAILS_ITE_8620.get(nom)
+            if definition:
+                libelle, ratio, nominale = definition
+                try:
+                    valeur_reelle = float(capteur["valeur"]) * ratio
+                except ValueError:
+                    resultats.append(capteur)
+                    continue
+                if abs(valeur_reelle - nominale) <= 0.1 * nominale:
+                    capteur["nom"] = libelle
+                    capteur["valeur"] = f"{valeur_reelle:.2f}"
+                else:
+                    capteur["nom"] = f"{nom} (brute)"
+            resultats.append(capteur)
+            continue
+        if capteur["type"] == "Ventilateur":
+            if capteur["valeur"] == "0":
+                capteur["etat"] = "—"
+            elif capteur["nom"] == "fan1":
+                capteur["nom"] = "Ventilateur CPU"
+        resultats.append(capteur)
+    return resultats
 
 
 def frequences_cpu():
