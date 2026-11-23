@@ -1226,6 +1226,89 @@ def frequences_cpu():
     return freqs
 
 
+def mesures_nvidia(executable="nvidia-smi"):
+    """Données GPU NVIDIA via `nvidia-smi` (température, ventilateur,
+    charge, mémoire VRAM, puissance du/des GPU). Liste vide si
+    nvidia-smi est absent (pas de pilote NVIDIA) ou indisponible."""
+    if shutil.which(executable) is None:
+        return []
+    try:
+        res = subprocess.run(
+            [executable,
+             "--query-gpu=name,temperature.gpu,fan.speed,utilization.gpu,"
+             "power.draw,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    capteurs = []
+    for i, brut in enumerate(res.stdout.splitlines()):
+        champs = [c.strip() for c in brut.split(",")]
+        if len(champs) < 7:
+            continue
+        nom_gpu = champs[0] or f"GPU {i + 1}"
+        prefixe = f"GPU NVIDIA — {nom_gpu}"
+
+        try:
+            temperature = float(champs[1])
+        except (ValueError, TypeError, IndexError):
+            pass
+        else:
+            if temperature > 0:
+                capteurs.append({
+                    "type": "Température", "nom": prefixe,
+                    "valeur": f"{temperature:.0f}", "unite": "°C", "limite": "95",
+                    "etat": capteur_etat(temperature >= 85, temperature / 95.0)})
+
+        try:
+            ventilo = float(champs[2])
+        except (ValueError, TypeError, IndexError):
+            pass
+        else:
+            if ventilo >= 0:
+                capteurs.append({
+                    "type": "Ventilateur", "nom": prefixe,
+                    "valeur": f"{ventilo:.0f}", "unite": "%",
+                    "limite": "100", "etat": "OK" if ventilo > 0 else "À surveiller"})
+
+        try:
+            charge = float(champs[3])
+        except (ValueError, TypeError, IndexError):
+            pass
+        else:
+            if charge >= 0:
+                capteurs.append({
+                    "type": "Charge", "nom": prefixe,
+                    "valeur": f"{charge:.0f}", "unite": "%", "limite": "—",
+                    "etat": "À surveiller" if charge >= 95 else "OK"})
+
+        try:
+            watts = float(champs[4])
+        except (ValueError, TypeError, IndexError):
+            pass
+        else:
+            if watts > 0:
+                capteurs.append({
+                    "type": "Puissance", "nom": prefixe,
+                    "valeur": f"{watts:.1f}", "unite": "W", "limite": "—", "etat": "OK"})
+
+        try:
+            vram_utilisee = float(champs[5])
+            vram_totale = float(champs[6])
+        except (ValueError, TypeError, IndexError):
+            pass
+        else:
+            if vram_totale > 0:
+                ratio_vram = vram_utilisee / vram_totale
+                capteurs.append({
+                    "type": "Mémoire VRAM", "nom": prefixe,
+                    "valeur": f"{vram_utilisee:.0f} / {vram_totale:.0f}", "unite": "MiB",
+                    "limite": f"{vram_totale:.0f}",
+                    "etat": "À surveiller" if ratio_vram >= 0.95 else "OK"})
+
+    return capteurs
+
+
 MOTIF_CAPTEUR_SENSORS = re.compile(
     r"^(.+?):\s+\+?(-?[\d.]+)\s*(°C|C|RPM|mV|V|A|W)\b")
 
@@ -1287,9 +1370,9 @@ def capteurs_depuis_sensors(texte=None):
 # vitesse du CPU en temps réel (tableau complet + export CSV)
 # ============================================================
 class KCapteursWindow(QDialog):
-    """Zone 15 : mesures en direct des fréquences CPU, de la charge
-    et des capteurs de la carte mère (températures, ventilateurs,
-    tensions, courants, puissances)."""
+    """Zone 15 : mesures en direct des fréquences CPU, de la charge,
+    des capteurs de la carte mère (températures, ventilateurs, tensions,
+    courants, puissances) et du GPU NVIDIA via nvidia-smi."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("KareDiag - Surveillance des capteurs et CPU (Zone 15)")
@@ -1339,9 +1422,9 @@ class KCapteursWindow(QDialog):
         layout.addWidget(titre)
 
         note = QLabel(
-            "Toutes les mesures s'affichent ici sans privilèges. Changez "
-            "l'intervalle de rafraîchissement à tout moment ; l'export CSV "
-            "enregistre le dernier instantané affiché."
+            "Toutes les mesures s'affichent ici sans privilèges : CPU, carte mère et GPU "
+            "NVIDIA (si nvidia-smi est installé). Changez l'intervalle de rafraîchissement "
+            "à tout moment ; l'export CSV enregistre le dernier instantané affiché."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1444,6 +1527,7 @@ class KCapteursWindow(QDialog):
                                f"{charge:.0f}", "%", "—", etat_charge))
         self.cpu_temps_precedent = temps
 
+        capteurs_gpu = mesures_nvidia()
         capteurs = mesures_hwmon()
         types_lus = {c["type"] for c in capteurs}
         repli = capteurs_depuis_sensors()
@@ -1461,6 +1545,9 @@ class KCapteursWindow(QDialog):
         for capteur in capteurs:
             lignes.append((capteur["nom"], capteur["type"], capteur["valeur"],
                            capteur["unite"], capteur["limite"], capteur["etat"]))
+        for capteur in capteurs_gpu:
+            lignes.append((capteur["nom"], capteur["type"], capteur["valeur"],
+                           capteur["unite"], capteur["limite"], capteur["etat"]))
 
         couleurs_etat = {"OK": "#98c379", "À surveiller": "#e5c07b", "ALERTE": "#e06c75"}
         self.table_capteurs.setRowCount(len(lignes))
@@ -1473,7 +1560,8 @@ class KCapteursWindow(QDialog):
                 self.table_capteurs.setItem(r, c, item)
 
         texte_etat = (f"Dernière mesure : {datetime.now().strftime('%H:%M:%S')} — "
-                      f"{len(frequences_cpu())} cœur(s) CPU, {len(capteurs)} capteur(s) de la carte mère.")
+                      f"{len(frequences_cpu())} cœur(s) CPU, {len(capteurs)} capteur(s) de la carte mère"
+                      + (f", {len(capteurs_gpu)} mesure(s) GPU NVIDIA." if capteurs_gpu else "."))
         if conseils:
             texte_etat += "  [i] " + ". ".join(conseils) + "."
         self.lbl_capteurs_etat.setText(texte_etat)
@@ -3964,7 +4052,8 @@ class KDiskApp(QMainWindow):
             titre_fenetre += "  —  [🛡️ Mode Administrateur]"
         self.setWindowTitle(titre_fenetre)
         hauteur_ecran = QApplication.primaryScreen().availableGeometry().height()
-        self.resize(980, min(1040, int(hauteur_ecran * 0.93)))
+        largeur_ecran = QApplication.primaryScreen().availableGeometry().width()
+        self.resize(min(1160, largeur_ecran), min(1040, int(hauteur_ecran * 0.93)))
 
         self.setStyleSheet("""
             QMainWindow { background-color: #181a1f; }
@@ -4338,7 +4427,7 @@ class KDiskApp(QMainWindow):
         self.group_zone15 = QGroupBox(" Zone 15 : Surveillance des capteurs et vitesse du CPU (temps réel) ")
         layout_zone15 = QHBoxLayout()
 
-        lbl_kcapteurs = QLabel("Fréquences par cœur, charge, températures, ventilateurs, tensions, courants et puissances — relevés en direct.")
+        lbl_kcapteurs = QLabel("Fréquences CPU, charge, températures, ventilateurs, tensions, puissances et GPU NVIDIA (nvidia-smi) — relevés en direct.")
         self.btn_open_kcapteurs = QPushButton("▶ Démarrer la surveillance")
         self.btn_open_kcapteurs.clicked.connect(self.ouvrir_kcapteurs)
 
