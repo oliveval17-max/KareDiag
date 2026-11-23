@@ -949,6 +949,7 @@ class KAlertesWindow(QDialog):
             self.log("[INFO] systemctl indisponible ou inaccessible.")
             return
         unites = [l.strip() for l in sortie.splitlines() if " failed " in l]
+        unites = [u.replace("\u25cf", " ").strip() for u in unites]
         propres = [u for u in unites
                    if not unite_faux_positif_live(u.split()[0] if u.split() else u)]
         ignores = len(unites) - len(propres)
