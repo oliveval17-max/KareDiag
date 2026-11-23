@@ -4349,6 +4349,23 @@ class KDiskApp(QMainWindow):
         self.group_zone15.setLayout(layout_zone15)
         main_layout.addWidget(self.group_zone15)
 
+        # ==========================================
+        # ZONE 16 : Signature / crédits
+        # (aucune fonction active : présentation uniquement)
+        # ==========================================
+        self.group_zone16 = QGroupBox(" Zone 16 : Conception ")
+        layout_zone16 = QHBoxLayout()
+
+        lbl_kredits = QLabel("Conception oliveval17-max with Mistral Vibe Code")
+        lbl_kredits.setAlignment(Qt.AlignCenter)
+        lbl_kredits.setStyleSheet("color: #7a8190; font-style: italic; font-size: 11px;")
+
+        layout_zone16.addWidget(lbl_kredits, stretch=1)
+        layout_zone16.setContentsMargins(9, 2, 9, 2)
+        self.group_zone16.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.group_zone16.setLayout(layout_zone16)
+        main_layout.addWidget(self.group_zone16)
+
         main_layout.addStretch(1)
         self.set_zones_enabled(False)
 
