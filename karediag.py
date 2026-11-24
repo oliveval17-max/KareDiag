@@ -1237,32 +1237,104 @@ def mesures_hwmon():
                 "etat": capteur_etat(alarme, None),
             })
 
-    return affiner_capteurs_ite(capteurs)
+    return affiner_capteurs(capteurs)
 
 
-# Libellés et échelles de la puce ITE IT8620E relevés sur les cartes
-# Gigabyte série H97 (configurations lm-sensors de référence) :
-# canal -> (libellé, ratio de conversion, tension nominale en V)
-RAILS_ITE_8620 = {
-    "in0": ("CPU Vcore", 1.0, 0.8),
-    "in1": ("+3.3V", 1.68, 3.3),
-    "in2": ("+12V", 6.0, 12.0),
-    "in3": ("+5V", 2.5, 5.0),
-    "in4": ("+3.3V", 1.649, 3.3),
-    "in5": ("CPU VRIN", 0.99, 1.7),
-    "in6": ("VDRAM", 1.0, 1.5),
+# Tables embarquées (extensibles : ajouter une entrée par puce).
+# Préfixe de puce -> canal -> (libellé ou None, ratio de conversion,
+# tension nominale en V ou None). Une nominale à None accepte la
+# conversion sans contrôle ; une nominale chiffrée n'accepte la
+# conversion que si le résultat reste à ±10 % de la valeur nominale.
+RAILS_PAR_PUCE = {
+    "it8620": {  # ITE IT8620E, cartes Gigabyte série H97 (configs lm-sensors de référence)
+        "in0": ("CPU Vcore", 1.0, 0.8),
+        "in1": ("+3.3V", 1.68, 3.3),
+        "in2": ("+12V", 6.0, 12.0),
+        "in3": ("+5V", 2.5, 5.0),
+        "in4": ("+3.3V", 1.649, 3.3),
+        "in5": ("CPU VRIN", 0.99, 1.7),
+        "in6": ("VDRAM", 1.0, 1.5),
+    },
 }
 
 
-def affiner_capteurs_ite(capteurs):
-    """Applique les libellés et ratios de la puce ITE IT8620E (Gigabyte H97).
+def lire_rails_sensors3_conf(chemin="/etc/sensors3.conf"):
+    """Lit une configuration lm-sensors : pour chaque section « chip "..." »,
+    recueille les libellés (« label inN \"Nom\" ») et les ratios
+    (« compute inN @*facteur, @/facteur ») des canaux de tension.
+    Retourne {préfixe_puce: {canal: (libellé ou None, ratio, None)}}."""
+    try:
+        with open(chemin, "r", encoding="utf-8", errors="replace") as f:
+            texte = f.read()
+    except OSError:
+        return {}
+    rails_par_puce = {}
+    prefixe_courant = None
+    for brut in texte.splitlines():
+        ligne = brut.split("#", 1)[0].strip()
+        if not ligne:
+            continue
+        m = re.match(r'chip\s+"([^"]*)"', ligne)
+        if m:
+            prefixe_courant = m.group(1).split("*")[0].lower().rstrip("-_")
+            continue
+        if prefixe_courant is None:
+            continue
+        m = re.match(r'label\s+(in\d+)\s+"([^"]*)"', ligne)
+        if m:
+            entree = rails_par_puce.setdefault(prefixe_courant, {}).get(m.group(1))
+            libelle = m.group(2) or None
+            ratio = entree[1] if entree else 1.0
+            rails_par_puce[prefixe_courant][m.group(1)] = (libelle, ratio, None)
+            continue
+        m = re.match(r'compute\s+(in\d+)\s+([^,]+),', ligne)
+        if m:
+            expression = m.group(2).strip()
+            if "@" not in expression:
+                continue
+            quotient = expression.replace("@", "1")
+            if not re.fullmatch(r"[0-9.()+*/ ]+", quotient):
+                continue
+            try:
+                ratio = float(eval(quotient, {"__builtins__": {}}, {}))
+            except Exception:
+                continue
+            if ratio <= 0:
+                continue
+            entree = rails_par_puce.setdefault(prefixe_courant, {}).get(m.group(1))
+            libelle = entree[0] if entree else None
+            rails_par_puce[prefixe_courant][m.group(1)] = (libelle, ratio, None)
+            continue
+    return rails_par_puce
+
+
+RAILS_CONF = lire_rails_sensors3_conf()
+
+
+def rails_pour_puce(nom_puce):
+    """Rails applicables à une puce : la configuration utilisateur
+    (/etc/sensors3.conf) prime sur les tables embarquées."""
+    puce = (nom_puce or "").strip().lower()
+    rails = {}
+    for table in (RAILS_PAR_PUCE, RAILS_CONF):
+        for prefixe, entree in table.items():
+            if prefixe and puce.startswith(prefixe):
+                rails.update(entree)
+    return rails
+
+
+def affiner_capteurs(capteurs):
+    """Applique les libellés et ratios calibrés (table embarquée de la puce
+    puis éventuellement /etc/sensors3.conf).
 
     Un canal converti n'est étiqueté que si le résultat reste à ±10 % de sa
-    tension nominale ; sinon la lecture brute est conservée sous forme
-    « inN (brute) ». Retire les sondes non connectées (lecture fantôme
-    -128 °C) et neutralise l'état des ventilateurs à l'arrêt.
+    tension nominale (quand une nominale est définie) ; sinon la lecture
+    brute est conservée sous forme « inN (brute) ». Retire les sondes non
+    connectées (lecture fantôme temp2 = -128 °C) et neutralise l'état des
+    ventilateurs à l'arrêt.
     """
     resultats = []
+    rails_par_source = {}
     for capteur in capteurs:
         if capteur["type"] == "Température":
             try:
@@ -1273,18 +1345,25 @@ def affiner_capteurs_ite(capteurs):
             resultats.append(capteur)
             continue
         if capteur["type"] == "Tension":
+            source = capteur.get("source", "")
+            if source not in rails_par_source:
+                rails_par_source[source] = rails_pour_puce(source)
             nom = capteur["nom"]
-            definition = RAILS_ITE_8620.get(nom)
+            definition = rails_par_source[source].get(nom)
             if definition:
                 libelle, ratio, nominale = definition
                 try:
                     valeur_reelle = float(capteur["valeur"]) * ratio
-                except ValueError:
+                except (TypeError, ValueError):
                     resultats.append(capteur)
                     continue
-                if abs(valeur_reelle - nominale) <= 0.1 * nominale:
-                    capteur["nom"] = libelle
-                    capteur["valeur"] = f"{valeur_reelle:.2f}"
+                accepte = (nominale is None
+                           or abs(valeur_reelle - nominale) <= 0.1 * nominale)
+                if accepte:
+                    if libelle:
+                        capteur["nom"] = libelle
+                    if ratio != 1.0 or nominale is not None:
+                        capteur["valeur"] = f"{valeur_reelle:.2f}"
                 else:
                     capteur["nom"] = f"{nom} (brute)"
             resultats.append(capteur)
@@ -1296,7 +1375,6 @@ def affiner_capteurs_ite(capteurs):
                 capteur["nom"] = "Ventilateur CPU"
         resultats.append(capteur)
     return resultats
-
 
 def frequences_cpu():
     """Fréquence actuelle (MHz) de chaque cœur logique depuis /proc/cpuinfo."""
