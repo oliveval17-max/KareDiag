@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QMessageBox,
     QTextEdit, QDialog, QFileDialog, QStackedWidget, QSizePolicy,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QScrollArea, QFrame
+    QAbstractItemView, QScrollArea, QFrame, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer, QProcess
 from PyQt5.QtGui import QColor, QBrush
@@ -1237,32 +1237,104 @@ def mesures_hwmon():
                 "etat": capteur_etat(alarme, None),
             })
 
-    return affiner_capteurs_ite(capteurs)
+    return affiner_capteurs(capteurs)
 
 
-# Libellés et échelles de la puce ITE IT8620E relevés sur les cartes
-# Gigabyte série H97 (configurations lm-sensors de référence) :
-# canal -> (libellé, ratio de conversion, tension nominale en V)
-RAILS_ITE_8620 = {
-    "in0": ("CPU Vcore", 1.0, 0.8),
-    "in1": ("+3.3V", 1.68, 3.3),
-    "in2": ("+12V", 6.0, 12.0),
-    "in3": ("+5V", 2.5, 5.0),
-    "in4": ("+3.3V", 1.649, 3.3),
-    "in5": ("CPU VRIN", 0.99, 1.7),
-    "in6": ("VDRAM", 1.0, 1.5),
+# Tables embarquées (extensibles : ajouter une entrée par puce).
+# Préfixe de puce -> canal -> (libellé ou None, ratio de conversion,
+# tension nominale en V ou None). Une nominale à None accepte la
+# conversion sans contrôle ; une nominale chiffrée n'accepte la
+# conversion que si le résultat reste à ±10 % de la valeur nominale.
+RAILS_PAR_PUCE = {
+    "it8620": {  # ITE IT8620E, cartes Gigabyte série H97 (configs lm-sensors de référence)
+        "in0": ("CPU Vcore", 1.0, 0.8),
+        "in1": ("+3.3V", 1.68, 3.3),
+        "in2": ("+12V", 6.0, 12.0),
+        "in3": ("+5V", 2.5, 5.0),
+        "in4": ("+3.3V", 1.649, 3.3),
+        "in5": ("CPU VRIN", 0.99, 1.7),
+        "in6": ("VDRAM", 1.0, 1.5),
+    },
 }
 
 
-def affiner_capteurs_ite(capteurs):
-    """Applique les libellés et ratios de la puce ITE IT8620E (Gigabyte H97).
+def lire_rails_sensors3_conf(chemin="/etc/sensors3.conf"):
+    """Lit une configuration lm-sensors : pour chaque section « chip "..." »,
+    recueille les libellés (« label inN \"Nom\" ») et les ratios
+    (« compute inN @*facteur, @/facteur ») des canaux de tension.
+    Retourne {préfixe_puce: {canal: (libellé ou None, ratio, None)}}."""
+    try:
+        with open(chemin, "r", encoding="utf-8", errors="replace") as f:
+            texte = f.read()
+    except OSError:
+        return {}
+    rails_par_puce = {}
+    prefixe_courant = None
+    for brut in texte.splitlines():
+        ligne = brut.split("#", 1)[0].strip()
+        if not ligne:
+            continue
+        m = re.match(r'chip\s+"([^"]*)"', ligne)
+        if m:
+            prefixe_courant = m.group(1).split("*")[0].lower().rstrip("-_")
+            continue
+        if prefixe_courant is None:
+            continue
+        m = re.match(r'label\s+(in\d+)\s+"([^"]*)"', ligne)
+        if m:
+            entree = rails_par_puce.setdefault(prefixe_courant, {}).get(m.group(1))
+            libelle = m.group(2) or None
+            ratio = entree[1] if entree else 1.0
+            rails_par_puce[prefixe_courant][m.group(1)] = (libelle, ratio, None)
+            continue
+        m = re.match(r'compute\s+(in\d+)\s+([^,]+),', ligne)
+        if m:
+            expression = m.group(2).strip()
+            if "@" not in expression:
+                continue
+            quotient = expression.replace("@", "1")
+            if not re.fullmatch(r"[0-9.()+*/ ]+", quotient):
+                continue
+            try:
+                ratio = float(eval(quotient, {"__builtins__": {}}, {}))
+            except Exception:
+                continue
+            if ratio <= 0:
+                continue
+            entree = rails_par_puce.setdefault(prefixe_courant, {}).get(m.group(1))
+            libelle = entree[0] if entree else None
+            rails_par_puce[prefixe_courant][m.group(1)] = (libelle, ratio, None)
+            continue
+    return rails_par_puce
+
+
+RAILS_CONF = lire_rails_sensors3_conf()
+
+
+def rails_pour_puce(nom_puce):
+    """Rails applicables à une puce : la configuration utilisateur
+    (/etc/sensors3.conf) prime sur les tables embarquées."""
+    puce = (nom_puce or "").strip().lower()
+    rails = {}
+    for table in (RAILS_PAR_PUCE, RAILS_CONF):
+        for prefixe, entree in table.items():
+            if prefixe and puce.startswith(prefixe):
+                rails.update(entree)
+    return rails
+
+
+def affiner_capteurs(capteurs):
+    """Applique les libellés et ratios calibrés (table embarquée de la puce
+    puis éventuellement /etc/sensors3.conf).
 
     Un canal converti n'est étiqueté que si le résultat reste à ±10 % de sa
-    tension nominale ; sinon la lecture brute est conservée sous forme
-    « inN (brute) ». Retire les sondes non connectées (lecture fantôme
-    -128 °C) et neutralise l'état des ventilateurs à l'arrêt.
+    tension nominale (quand une nominale est définie) ; sinon la lecture
+    brute est conservée sous forme « inN (brute) ». Retire les sondes non
+    connectées (lecture fantôme temp2 = -128 °C) et neutralise l'état des
+    ventilateurs à l'arrêt.
     """
     resultats = []
+    rails_par_source = {}
     for capteur in capteurs:
         if capteur["type"] == "Température":
             try:
@@ -1273,18 +1345,25 @@ def affiner_capteurs_ite(capteurs):
             resultats.append(capteur)
             continue
         if capteur["type"] == "Tension":
+            source = capteur.get("source", "")
+            if source not in rails_par_source:
+                rails_par_source[source] = rails_pour_puce(source)
             nom = capteur["nom"]
-            definition = RAILS_ITE_8620.get(nom)
+            definition = rails_par_source[source].get(nom)
             if definition:
                 libelle, ratio, nominale = definition
                 try:
                     valeur_reelle = float(capteur["valeur"]) * ratio
-                except ValueError:
+                except (TypeError, ValueError):
                     resultats.append(capteur)
                     continue
-                if abs(valeur_reelle - nominale) <= 0.1 * nominale:
-                    capteur["nom"] = libelle
-                    capteur["valeur"] = f"{valeur_reelle:.2f}"
+                accepte = (nominale is None
+                           or abs(valeur_reelle - nominale) <= 0.1 * nominale)
+                if accepte:
+                    if libelle:
+                        capteur["nom"] = libelle
+                    if ratio != 1.0 or nominale is not None:
+                        capteur["valeur"] = f"{valeur_reelle:.2f}"
                 else:
                     capteur["nom"] = f"{nom} (brute)"
             resultats.append(capteur)
@@ -1296,7 +1375,6 @@ def affiner_capteurs_ite(capteurs):
                 capteur["nom"] = "Ventilateur CPU"
         resultats.append(capteur)
     return resultats
-
 
 def frequences_cpu():
     """Fréquence actuelle (MHz) de chaque cœur logique depuis /proc/cpuinfo."""
@@ -3751,6 +3829,10 @@ class KClonageWindow(QDialog):
         self.process = None
         self.blocs = []
         self.disque_courant = disque_courant
+        self.process_empreinte = None
+        self.mode_empreinte = None
+        self.chemin_empreinte = None
+        self.chemin_reference = None
 
         self.setStyleSheet("""
             QDialog { background-color: #181a1f; }
@@ -3860,6 +3942,16 @@ class KClonageWindow(QDialog):
         row_btns.addWidget(self.btn_lancer)
         row_btns.addWidget(self.btn_arreter)
         layout.addLayout(row_btns)
+
+        row_empreinte = QHBoxLayout()
+        self.chk_empreinte = QCheckBox(
+            "Calculer l'empreinte SHA-256 après un clonage vers une image")
+        self.chk_empreinte.setChecked(True)
+        self.btn_verif_empreinte = QPushButton("\U0001f9ee Vérifier une image")
+        self.btn_verif_empreinte.clicked.connect(self.verifier_image)
+        row_empreinte.addWidget(self.chk_empreinte)
+        row_empreinte.addWidget(self.btn_verif_empreinte)
+        layout.addLayout(row_empreinte)
 
         groupe_log = QGroupBox(" Journal du clonage ")
         log_layout = QVBoxLayout(groupe_log)
@@ -4096,6 +4188,10 @@ class KClonageWindow(QDialog):
                 self, "Succès",
                 "Clonage terminé avec succès.\nJournal ddrescue :\n" + journal
             )
+            if (self.chk_empreinte.isChecked()
+                    and self.MODES[self.combo_mode.currentText()][1] == "fichier"
+                    and self.chemin_destination()):
+                self.calculer_empreinte(self.chemin_destination())
         else:
             self.logg(f"Clonage terminé avec le code retour {code}.")
             QMessageBox.warning(
@@ -4126,9 +4222,123 @@ class KClonageWindow(QDialog):
         if self.process is not None and self.process.state() != QProcess.NotRunning:
             self.process.kill()
 
+    def verifier_image(self):
+        chemin, _ = QFileDialog.getOpenFileName(
+            self, "Image disque à vérifier", os.path.expanduser("~"),
+            "Images disque (*.img *.iso *.dd *.bin);;Tous les fichiers (*)"
+        )
+        if not chemin:
+            return
+        reference = chemin + ".sha256"
+        if os.path.isfile(reference):
+            self.calculer_empreinte(chemin, reference)
+        else:
+            self.logg("Aucun fichier de référence adjacent trouvé "
+                      f"({os.path.basename(reference)} absent) — "
+                      "calcul de l'empreinte seule.")
+            self.calculer_empreinte(chemin)
+
+    def calculer_empreinte(self, chemin, chemin_reference=None):
+        """Calcule l'empreinte SHA-256 d'une image (via sha256sum, élevé si
+        nécessaire). Si une référence .sha256 est fournie, compare et rend
+        un verdict conforme / corrompu."""
+        if self.process_empreinte is not None:
+            self.logg("Un calcul d'empreinte est déjà en cours.")
+            return
+        if not shutil.which("sha256sum"):
+            self.logg("sha256sum introuvable — installez le paquet « coreutils ».")
+            return
+        self.mode_empreinte = "verification" if chemin_reference else "calcul"
+        self.chemin_empreinte = chemin
+        self.chemin_reference = chemin_reference
+        args = prefixe_privilege() + ["sha256sum", chemin]
+        self.process_empreinte = QProcess(self)
+        self.process_empreinte.setProcessChannelMode(QProcess.MergedChannels)
+        self.process_empreinte.finished.connect(self.empreinte_terminee)
+        self.process_empreinte.errorOccurred.connect(self.erreur_processus)
+        self.process_empreinte.start(args[0], args[1:])
+        self.btn_verif_empreinte.setEnabled(False)
+        if chemin_reference:
+            self.logg(f"Vérification SHA-256 de {chemin} en cours "
+                      "(peut prendre plusieurs minutes pour une grande image)...")
+        else:
+            self.logg(f"Calcul de l'empreinte SHA-256 de {chemin} en cours "
+                      "(peut prendre plusieurs minutes pour une grande image)...")
+
+    def empreinte_terminee(self, code, statut):
+        donnees = b""
+        if self.process_empreinte is not None:
+            donnees = bytes(self.process_empreinte.readAllStandardOutput())
+            self.process_empreinte = None
+        self.btn_verif_empreinte.setEnabled(True)
+        if statut == QProcess.CrashExit:
+            self.logg("Calcul d'empreinte interrompu.")
+            return
+        if code != 0:
+            self.logg(f"Calcul d'empreinte échoué (code {code}).")
+            QMessageBox.warning(
+                self, "Échec",
+                "Le calcul de l'empreinte a échoué.\n"
+                "Vérifiez que le fichier est lisible (image créée en "
+                "mode administrateur ?) et que sha256sum est installé.")
+            return
+        empreinte = donnees.decode("utf-8", "replace").splitlines()[0].split()[0]
+        empreinte = empreinte.lower()
+
+        if self.mode_empreinte == "calcul":
+            fichier = self.chemin_empreinte + ".sha256"
+            try:
+                with open(fichier, "w", encoding="utf-8") as f:
+                    f.write(f"{empreinte}  {os.path.basename(self.chemin_empreinte)}\n")
+            except OSError as e:
+                self.logg(f"Empreinte calculée mais non enregistrée : {e}")
+                QMessageBox.information(
+                    self, "Empreinte SHA-256",
+                    "Empreinte calculée :\n" + empreinte
+                    + "\n\n(enregistrement impossible à côté de l'image)")
+                return
+            self.logg(f"Empreinte SHA-256 calculée et enregistrée : {fichier}\n{empreinte}")
+            QMessageBox.information(
+                self, "Empreinte SHA-256 enregistrée",
+                "Empreinte de l'image calculée :\n\n" + empreinte[:32] + "...\n\n"
+                "Elle est enregistrée à côté de l'image :\n" + fichier
+                + "\n\nConservez ce fichier : il prouvera plus tard que l'image "
+                "n'a pas été corrompue.")
+            return
+
+        try:
+            with open(self.chemin_reference, "r", encoding="utf-8") as f:
+                attendue = f.read().split()[0].lower()
+        except (OSError, IndexError):
+            self.logg("Fichier de référence illisible — empreinte : " + empreinte)
+            QMessageBox.warning(
+                self, "Référence illisible",
+                "Le fichier .sha256 n'a pas pu être lu.\nEmpreinte calculée :\n"
+                + empreinte)
+            return
+        if attendue == empreinte:
+            self.logg("Vérification SHA-256 : EMPREINTES IDENTIQUES.\n"
+                      "  image :   " + empreinte + "\n"
+                      "  fichier : " + attendue)
+            QMessageBox.information(
+                self, "Image conforme \u2705",
+                "L'empreinte SHA-256 de l'image est IDENTIQUE à la référence.\n\n"
+                "L'image n'a subi aucune corruption depuis son enregistrement.")
+        else:
+            self.logg("Vérification SHA-256 : EMPREINTES DIFFÉRENTES !\n"
+                      "  image :   " + empreinte + "\n"
+                      "  fichier : " + attendue)
+            QMessageBox.critical(
+                self, "Image corrompue \U0001f9db",
+                "L'empreinte SHA-256 de l'image est DIFFÉRENTE de la référence.\n\n"
+                "L'image a été corrompue ou modifiée depuis l'enregistrement.\n"
+                "Ne l'utilisez pas pour une restauration.")
+
     def closeEvent(self, event):
         if self.process is not None:
             self.process.terminate()
+        if self.process_empreinte is not None:
+            self.process_empreinte.terminate()
         event.accept()
 
 
