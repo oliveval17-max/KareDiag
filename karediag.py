@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QMessageBox,
     QTextEdit, QDialog, QFileDialog, QStackedWidget, QSizePolicy,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QScrollArea, QFrame
+    QAbstractItemView, QScrollArea, QFrame, QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer, QProcess
 from PyQt5.QtGui import QColor, QBrush
@@ -3829,6 +3829,10 @@ class KClonageWindow(QDialog):
         self.process = None
         self.blocs = []
         self.disque_courant = disque_courant
+        self.process_empreinte = None
+        self.mode_empreinte = None
+        self.chemin_empreinte = None
+        self.chemin_reference = None
 
         self.setStyleSheet("""
             QDialog { background-color: #181a1f; }
@@ -3938,6 +3942,16 @@ class KClonageWindow(QDialog):
         row_btns.addWidget(self.btn_lancer)
         row_btns.addWidget(self.btn_arreter)
         layout.addLayout(row_btns)
+
+        row_empreinte = QHBoxLayout()
+        self.chk_empreinte = QCheckBox(
+            "Calculer l'empreinte SHA-256 après un clonage vers une image")
+        self.chk_empreinte.setChecked(True)
+        self.btn_verif_empreinte = QPushButton("\U0001f9ee Vérifier une image")
+        self.btn_verif_empreinte.clicked.connect(self.verifier_image)
+        row_empreinte.addWidget(self.chk_empreinte)
+        row_empreinte.addWidget(self.btn_verif_empreinte)
+        layout.addLayout(row_empreinte)
 
         groupe_log = QGroupBox(" Journal du clonage ")
         log_layout = QVBoxLayout(groupe_log)
@@ -4174,6 +4188,10 @@ class KClonageWindow(QDialog):
                 self, "Succès",
                 "Clonage terminé avec succès.\nJournal ddrescue :\n" + journal
             )
+            if (self.chk_empreinte.isChecked()
+                    and self.MODES[self.combo_mode.currentText()][1] == "fichier"
+                    and self.chemin_destination()):
+                self.calculer_empreinte(self.chemin_destination())
         else:
             self.logg(f"Clonage terminé avec le code retour {code}.")
             QMessageBox.warning(
@@ -4204,9 +4222,123 @@ class KClonageWindow(QDialog):
         if self.process is not None and self.process.state() != QProcess.NotRunning:
             self.process.kill()
 
+    def verifier_image(self):
+        chemin, _ = QFileDialog.getOpenFileName(
+            self, "Image disque à vérifier", os.path.expanduser("~"),
+            "Images disque (*.img *.iso *.dd *.bin);;Tous les fichiers (*)"
+        )
+        if not chemin:
+            return
+        reference = chemin + ".sha256"
+        if os.path.isfile(reference):
+            self.calculer_empreinte(chemin, reference)
+        else:
+            self.logg("Aucun fichier de référence adjacent trouvé "
+                      f"({os.path.basename(reference)} absent) — "
+                      "calcul de l'empreinte seule.")
+            self.calculer_empreinte(chemin)
+
+    def calculer_empreinte(self, chemin, chemin_reference=None):
+        """Calcule l'empreinte SHA-256 d'une image (via sha256sum, élevé si
+        nécessaire). Si une référence .sha256 est fournie, compare et rend
+        un verdict conforme / corrompu."""
+        if self.process_empreinte is not None:
+            self.logg("Un calcul d'empreinte est déjà en cours.")
+            return
+        if not shutil.which("sha256sum"):
+            self.logg("sha256sum introuvable — installez le paquet « coreutils ».")
+            return
+        self.mode_empreinte = "verification" if chemin_reference else "calcul"
+        self.chemin_empreinte = chemin
+        self.chemin_reference = chemin_reference
+        args = prefixe_privilege() + ["sha256sum", chemin]
+        self.process_empreinte = QProcess(self)
+        self.process_empreinte.setProcessChannelMode(QProcess.MergedChannels)
+        self.process_empreinte.finished.connect(self.empreinte_terminee)
+        self.process_empreinte.errorOccurred.connect(self.erreur_processus)
+        self.process_empreinte.start(args[0], args[1:])
+        self.btn_verif_empreinte.setEnabled(False)
+        if chemin_reference:
+            self.logg(f"Vérification SHA-256 de {chemin} en cours "
+                      "(peut prendre plusieurs minutes pour une grande image)...")
+        else:
+            self.logg(f"Calcul de l'empreinte SHA-256 de {chemin} en cours "
+                      "(peut prendre plusieurs minutes pour une grande image)...")
+
+    def empreinte_terminee(self, code, statut):
+        donnees = b""
+        if self.process_empreinte is not None:
+            donnees = bytes(self.process_empreinte.readAllStandardOutput())
+            self.process_empreinte = None
+        self.btn_verif_empreinte.setEnabled(True)
+        if statut == QProcess.CrashExit:
+            self.logg("Calcul d'empreinte interrompu.")
+            return
+        if code != 0:
+            self.logg(f"Calcul d'empreinte échoué (code {code}).")
+            QMessageBox.warning(
+                self, "Échec",
+                "Le calcul de l'empreinte a échoué.\n"
+                "Vérifiez que le fichier est lisible (image créée en "
+                "mode administrateur ?) et que sha256sum est installé.")
+            return
+        empreinte = donnees.decode("utf-8", "replace").splitlines()[0].split()[0]
+        empreinte = empreinte.lower()
+
+        if self.mode_empreinte == "calcul":
+            fichier = self.chemin_empreinte + ".sha256"
+            try:
+                with open(fichier, "w", encoding="utf-8") as f:
+                    f.write(f"{empreinte}  {os.path.basename(self.chemin_empreinte)}\n")
+            except OSError as e:
+                self.logg(f"Empreinte calculée mais non enregistrée : {e}")
+                QMessageBox.information(
+                    self, "Empreinte SHA-256",
+                    "Empreinte calculée :\n" + empreinte
+                    + "\n\n(enregistrement impossible à côté de l'image)")
+                return
+            self.logg(f"Empreinte SHA-256 calculée et enregistrée : {fichier}\n{empreinte}")
+            QMessageBox.information(
+                self, "Empreinte SHA-256 enregistrée",
+                "Empreinte de l'image calculée :\n\n" + empreinte[:32] + "...\n\n"
+                "Elle est enregistrée à côté de l'image :\n" + fichier
+                + "\n\nConservez ce fichier : il prouvera plus tard que l'image "
+                "n'a pas été corrompue.")
+            return
+
+        try:
+            with open(self.chemin_reference, "r", encoding="utf-8") as f:
+                attendue = f.read().split()[0].lower()
+        except (OSError, IndexError):
+            self.logg("Fichier de référence illisible — empreinte : " + empreinte)
+            QMessageBox.warning(
+                self, "Référence illisible",
+                "Le fichier .sha256 n'a pas pu être lu.\nEmpreinte calculée :\n"
+                + empreinte)
+            return
+        if attendue == empreinte:
+            self.logg("Vérification SHA-256 : EMPREINTES IDENTIQUES.\n"
+                      "  image :   " + empreinte + "\n"
+                      "  fichier : " + attendue)
+            QMessageBox.information(
+                self, "Image conforme \u2705",
+                "L'empreinte SHA-256 de l'image est IDENTIQUE à la référence.\n\n"
+                "L'image n'a subi aucune corruption depuis son enregistrement.")
+        else:
+            self.logg("Vérification SHA-256 : EMPREINTES DIFFÉRENTES !\n"
+                      "  image :   " + empreinte + "\n"
+                      "  fichier : " + attendue)
+            QMessageBox.critical(
+                self, "Image corrompue \U0001f9db",
+                "L'empreinte SHA-256 de l'image est DIFFÉRENTE de la référence.\n\n"
+                "L'image a été corrompue ou modifiée depuis l'enregistrement.\n"
+                "Ne l'utilisez pas pour une restauration.")
+
     def closeEvent(self, event):
         if self.process is not None:
             self.process.terminate()
+        if self.process_empreinte is not None:
+            self.process_empreinte.terminate()
         event.accept()
 
 
