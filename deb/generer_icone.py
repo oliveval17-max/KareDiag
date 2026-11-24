@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Génère les icônes PNG de KareDiag pour le paquet Debian (.deb).
 
-Deux moteurs, au choix automatique :
- - Qt (QImage + QPainter, plateforme hors-écran) : portage direct de
-   icone_karediag() de karediag.py — utilisé si PyQt5 est présent ;
+Deux moteurs :
  - pur Python (stdlib : zlib/struct uniquement) : rendu rasterisé
-   indépendant de Qt, en repli si PyQt5 est indisponible.
+   indépendant de Qt — **par défaut**, déterministe, sans dépendance ;
+ - Qt (QImage + QPainter, plateforme hors-écran) : portage direct de
+   icone_karediag() de karediag.py — option `--moteur qt`.
 
 Usage :
     python3 generer_icone.py --dossier <racine-hicolor>
@@ -23,16 +23,22 @@ TAILLES = (128, 64, 48)
 SUR = 4
 
 
+_APPLICATION = None
+
+
 def application_qt():
     """Instance QApplication unique (hors-écran) : indispensable avant
     tout emploi de polices (QFont/drawText) sur une QImage, sous peine
-    d'avertissement Qt voire de plantage (segfault)."""
-    from PyQt5.QtWidgets import QApplication
+    d'avertissement Qt voire de plantage (segfault). La référence est
+    conservée au niveau du module : si Python la ramassait, Qt détruirait
+    l'application au vol du dessin."""
+    global _APPLICATION
+    if _APPLICATION is None:
+        from PyQt5.QtWidgets import QApplication
 
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(["generer_icone"])
-    return app
+        _APPLICATION = QApplication.instance() or QApplication(
+            ["generer_icone"])
+    return _APPLICATION
 
 
 def dessiner_qt(taille):
@@ -225,13 +231,17 @@ def ecrire_png(chemin, largeur, hauteur, lignes):
         f.write(bloc(b"IEND", b""))
 
 
-def generer_jeu(dossier):
-    qt_disponible = True
-    try:
-        application_qt()
-        from PyQt5.QtGui import QImage  # charge réellement la liaison Qt
-    except Exception:
-        qt_disponible = False
+def generer_jeu(dossier, moteur="pur"):
+    """Moteur « pur » par défaut : déterministe, sans PyQt5, déjà validé
+    visuellement. --moteur qt opt-in pour le rendu Qt des polices."""
+    qt_disponible = False
+    if moteur == "qt":
+        try:
+            application_qt()
+            from PyQt5.QtGui import QImage  # charge réellement la liaison Qt
+            qt_disponible = True
+        except Exception:
+            qt_disponible = False
 
     for taille in TAILLES:
         dossier_taille = os.path.join(
@@ -254,8 +264,10 @@ def main():
         description="Génère les icônes PNG KareDiag (128/64/48).")
     analyse.add_argument("--dossier", required=True,
                          help="racine du thème hicolor de destination")
+    analyse.add_argument("--moteur", choices=("pur", "qt"), default="pur",
+                         help="moteur de rendu (pur par défaut)")
     arguments = analyse.parse_args()
-    moteur = generer_jeu(arguments.dossier)
+    moteur = generer_jeu(arguments.dossier, arguments.moteur)
     print(f"Icônes générées (moteur : {moteur}) dans {arguments.dossier}")
     return 0
 
