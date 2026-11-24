@@ -22,7 +22,7 @@ from PyQt5.QtGui import (QColor, QBrush, QIcon, QPixmap, QPainter, QPen,
                          QFont, QPainterPath)
 
 NOM_APPLICATION = "KareDiag"
-VERSION_APPLICATION = "8.4.0"
+VERSION_APPLICATION = "8.4.1"
 
 
 # ============================================================
@@ -5409,6 +5409,7 @@ def drapeau_francais(largeur=27, hauteur=18):
     coins arrondis et fin liseré sombre, afin d'être indépendant des
     polices emoji du système (les drapeaux emojis s'affichent souvent
     en lettres « FR » sous Linux)."""
+    largeur, hauteur = int(largeur), int(hauteur)
     pixmap = QPixmap(largeur, hauteur)
     pixmap.fill(Qt.transparent)
     peintre = QPainter(pixmap)
@@ -5416,7 +5417,7 @@ def drapeau_francais(largeur=27, hauteur=18):
     chemin = QPainterPath()
     chemin.addRoundedRect(0.5, 0.5, largeur - 1, hauteur - 1, 3, 3)
     peintre.setClipPath(chemin)
-    tiers = largeur / 3.0
+    tiers = largeur // 3
     peintre.fillRect(0, 0, tiers, hauteur, QColor("#0055A4"))
     peintre.fillRect(tiers, 0, tiers, hauteur, QColor("#FFFFFF"))
     peintre.fillRect(2 * tiers, 0, largeur - 2 * tiers, hauteur,
