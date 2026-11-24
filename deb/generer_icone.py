@@ -23,6 +23,18 @@ TAILLES = (128, 64, 48)
 SUR = 4
 
 
+def application_qt():
+    """Instance QApplication unique (hors-écran) : indispensable avant
+    tout emploi de polices (QFont/drawText) sur une QImage, sous peine
+    d'avertissement Qt voire de plantage (segfault)."""
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(["generer_icone"])
+    return app
+
+
 def dessiner_qt(taille):
     """Portage fidèle de icone_karediag() sur une QImage hors-écran."""
     from PyQt5.QtGui import (QColor, QFont, QPainter, QPainterPath, QPen,
@@ -216,6 +228,7 @@ def ecrire_png(chemin, largeur, hauteur, lignes):
 def generer_jeu(dossier):
     qt_disponible = True
     try:
+        application_qt()
         from PyQt5.QtGui import QImage  # charge réellement la liaison Qt
     except Exception:
         qt_disponible = False
