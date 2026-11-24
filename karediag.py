@@ -22,7 +22,7 @@ from PyQt5.QtGui import (QColor, QBrush, QIcon, QPixmap, QPainter, QPen,
                          QFont, QPainterPath)
 
 NOM_APPLICATION = "KareDiag"
-VERSION_APPLICATION = "8.3.0"
+VERSION_APPLICATION = "8.4.0"
 
 
 # ============================================================
@@ -4769,11 +4769,21 @@ class KDiskApp(QMainWindow):
 
         lbl_kredits = QLabel(
             f"oliveval17-max avec Mistral Vibe Code : KareDiag "
-            f"V-{VERSION_APPLICATION} optimisé pour Kaisen Linux 🇫🇷")
-        lbl_kredits.setAlignment(Qt.AlignCenter)
+            f"V-{VERSION_APPLICATION} optimisé pour Kaisen Linux")
+        lbl_kredits.setAlignment(Qt.AlignVCenter)
         lbl_kredits.setStyleSheet("color: #7a8190; font-style: italic; font-size: 11px;")
 
-        layout_zone16.addWidget(lbl_kredits, stretch=1)
+        lbl_drapeau = QLabel()
+        lbl_drapeau.setPixmap(drapeau_francais())
+        lbl_drapeau.setAlignment(Qt.AlignVCenter)
+
+        ligne_kredits = QHBoxLayout()
+        ligne_kredits.addStretch(1)
+        ligne_kredits.addWidget(lbl_kredits)
+        ligne_kredits.addSpacing(6)
+        ligne_kredits.addWidget(lbl_drapeau)
+        ligne_kredits.addStretch(1)
+        layout_zone16.addLayout(ligne_kredits, stretch=1)
         layout_zone16.setContentsMargins(9, 2, 9, 2)
         self.group_zone16.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.group_zone16.setLayout(layout_zone16)
@@ -5392,6 +5402,29 @@ def icone_karediag(taille=64):
 
     peintre.end()
     return QIcon(pixmap)
+
+
+def drapeau_francais(largeur=27, hauteur=18):
+    """Petit drapeau tricolore dessiné pur code (bleu, blanc, rouge),
+    coins arrondis et fin liseré sombre, afin d'être indépendant des
+    polices emoji du système (les drapeaux emojis s'affichent souvent
+    en lettres « FR » sous Linux)."""
+    pixmap = QPixmap(largeur, hauteur)
+    pixmap.fill(Qt.transparent)
+    peintre = QPainter(pixmap)
+    peintre.setRenderHint(QPainter.Antialiasing, True)
+    chemin = QPainterPath()
+    chemin.addRoundedRect(0.5, 0.5, largeur - 1, hauteur - 1, 3, 3)
+    peintre.setClipPath(chemin)
+    tiers = largeur / 3.0
+    peintre.fillRect(0, 0, tiers, hauteur, QColor("#0055A4"))
+    peintre.fillRect(tiers, 0, tiers, hauteur, QColor("#FFFFFF"))
+    peintre.fillRect(2 * tiers, 0, largeur - 2 * tiers, hauteur,
+                     QColor("#EF4135"))
+    peintre.setPen(QPen(QColor("#3e4451"), 1))
+    peintre.drawRoundedRect(1, 1, largeur - 2, hauteur - 2, 3, 3)
+    peintre.end()
+    return pixmap
 
 def installer_lanceur_et_icone():
     """Installe l'icône KareDiag dans le thème hicolor et crée un lanceur
