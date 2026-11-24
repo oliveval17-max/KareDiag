@@ -22,6 +22,7 @@ from PyQt5.QtGui import (QColor, QBrush, QIcon, QPixmap, QPainter, QPen,
                          QFont, QPainterPath)
 
 NOM_APPLICATION = "KareDiag"
+VERSION_APPLICATION = "8.3.0"
 
 
 # ============================================================
@@ -64,6 +65,22 @@ def bureau_utilisateur():
         next((p for p in ["~/Desktop", "~/Bureau"]
               if os.path.isdir(os.path.expanduser(p))), "~")
     )
+
+
+def distro_detectee(chemin="/etc/os-release"):
+    """Nom de la distribution linux détectée, lu depuis /etc/os-release
+    (champ PRETTY_NAME, sinon NAME). Repli : « Linux » si non détectable."""
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            paires = {}
+            for ligne in f:
+                if "=" in ligne:
+                    cle, valeur = ligne.split("=", 1)
+                    paires[cle.strip()] = valeur.strip()
+        nom = paires.get("PRETTY_NAME") or paires.get("NAME") or ""
+        return nom.strip().strip('"') or "Linux"
+    except Exception:
+        return "Linux"
 
 
 class RapportWindow(QDialog):
@@ -4347,7 +4364,9 @@ class KClonageWindow(QDialog):
 class KDiskApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        titre_fenetre = "KareDiag - Maintenance et diagnostic système (Kaisen Linux)"
+        titre_fenetre = (
+            f"KareDiag - Maintenance et diagnostic système ({distro_detectee()})"
+        )
         if est_root():
             titre_fenetre += "  —  [🛡️ Mode Administrateur]"
         self.setWindowTitle(titre_fenetre)
@@ -4417,8 +4436,10 @@ class KDiskApp(QMainWindow):
         self.btn_auth = QPushButton("S'authentifier (PolicyKit)")
         self.btn_auth.clicked.connect(self.authenticate)
 
-        self.lbl_status = QLabel("Statut : Verrouillé (Privilèges administrateur requis)")
-        self.lbl_status.setStyleSheet("color: #e06c75; font-weight: bold;")
+        self.lbl_status = QLabel(
+            "Statut : Privilèges à la demande "
+            "(cliquez sur « S'authentifier (PolicyKit) » au besoin)")
+        self.lbl_status.setStyleSheet("color: #e5c07b; font-weight: bold;")
 
         layout_zone1.addWidget(self.btn_auth)
         layout_zone1.addWidget(self.lbl_status)
@@ -4517,7 +4538,8 @@ class KDiskApp(QMainWindow):
         layout_zone5.addLayout(layout_z5_n2)
 
         layout_z5_n3 = QHBoxLayout()
-        self.btn_outils_disques = QPushButton("🧰 Outils avancés (fsck / surface / SSD-NVMe)")
+        self.btn_outils_disques = QPushButton(
+            "🧰 Dépannage avancé des disques (réparation, surface, NVMe)")
         self.btn_outils_disques.clicked.connect(self.ouvrir_koutils_disques)
         layout_z5_n3.addWidget(self.btn_outils_disques)
         layout_zone5.addLayout(layout_z5_n3)
@@ -4745,7 +4767,9 @@ class KDiskApp(QMainWindow):
         self.group_zone16 = QGroupBox(" Zone 16 : Conception ")
         layout_zone16 = QHBoxLayout()
 
-        lbl_kredits = QLabel("Conception oliveval17-max with Mistral Vibe Code")
+        lbl_kredits = QLabel(
+            f"oliveval17-max avec Mistral Vibe Code : KareDiag "
+            f"V-{VERSION_APPLICATION} optimisé pour Kaisen Linux 🇫🇷")
         lbl_kredits.setAlignment(Qt.AlignCenter)
         lbl_kredits.setStyleSheet("color: #7a8190; font-style: italic; font-size: 11px;")
 
