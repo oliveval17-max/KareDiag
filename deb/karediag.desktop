@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KareDiag
+Comment=Maintenance et diagnostic système
+Exec=/usr/bin/karediag
+Icon=karediag
+Terminal=false
+Categories=System;Utility;

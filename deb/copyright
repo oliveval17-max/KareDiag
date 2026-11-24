@@ -1,0 +1,9 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: KareDiag
+Source: https://github.com/oliveval17-max/KareDiag
+
+Files: *
+Copyright: 2026 oliveval17-max
+License: Tous-droits-reserves
+ Tous droits réservés. Licence libre à définir par l'auteur
+ (par exemple MIT ou GPL-3.0).
