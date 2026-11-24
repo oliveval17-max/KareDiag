@@ -16,8 +16,9 @@ from PyQt5.QtWidgets import (
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QScrollArea, QFrame, QCheckBox
 )
-from PyQt5.QtCore import Qt, QTimer, QProcess
-from PyQt5.QtGui import QColor, QBrush
+from PyQt5.QtCore import Qt, QTimer, QProcess, QPoint
+from PyQt5.QtGui import (QColor, QBrush, QIcon, QPixmap, QPainter, QPen,
+                         QFont, QPainterPath)
 
 NOM_APPLICATION = "KareDiag"
 
@@ -5319,6 +5320,55 @@ Date / Contexte : Analyse Kaisen Linux - KareDiag
         self.fenetre_rapport.exec_()
 
 
+def icone_karediag(taille=64):
+    """Icône KareDiag en pur code (aucun fichier binaire) : reproduction
+    fidèle du SVG de conception oliveval17-max — écran de diagnostic sombre,
+    bord cyan, « K », lignes grises et pastille verte d'état. Le dessin est
+    vectoriel : net à toutes les tailles (barre des tâches, bureau...)."""
+    def g(valeur):
+        return int(round(valeur * (taille / 128)))
+
+    pixmap = QPixmap(taille, taille)
+    pixmap.fill(Qt.transparent)
+    peintre = QPainter(pixmap)
+    peintre.setRenderHint(QPainter.Antialiasing)
+
+    fond = QPainterPath()
+    fond.addRoundedRect(g(4), g(4), g(120), g(120), g(24), g(24))
+    peintre.fillPath(fond, QColor("#181a1f"))
+    peintre.setPen(QPen(QColor("#3e4451"), g(2)))
+    peintre.drawPath(fond)
+
+    ecran = QPainterPath()
+    ecran.addRoundedRect(g(28), g(42), g(72), g(48), g(8), g(8))
+    peintre.fillPath(ecran, QColor("#21252b"))
+    peintre.setPen(QPen(QColor("#00bcd4"), g(3)))
+    peintre.drawPath(ecran)
+
+    peintre.setPen(Qt.NoPen)
+    peintre.setBrush(QColor(0x00, 0xbc, 0xd4, 64))
+    peintre.drawRoundedRect(g(36), g(72), g(56), g(10), g(5), g(5))
+
+    peintre.setBrush(QColor("#3e4451"))
+    peintre.drawRoundedRect(g(36), g(50), g(40), g(4), g(2), g(2))
+    peintre.drawRoundedRect(g(36), g(60), g(28), g(4), g(2), g(2))
+
+    police = QFont("Arial")
+    police.setPixelSize(g(30))
+    police.setBold(True)
+    peintre.setFont(police)
+    peintre.setPen(QPen(QColor("#00bcd4")))
+    peintre.drawText(0, 0, g(116), g(72),
+                     Qt.AlignHCenter | Qt.AlignBottom, "K")
+
+    peintre.setPen(Qt.NoPen)
+    peintre.setBrush(QColor("#98c379"))
+    peintre.drawEllipse(QPoint(g(88), g(77)), g(5), g(5))
+
+    peintre.end()
+    return QIcon(pixmap)
+
+
 if __name__ == "__main__":
     try:
         # Authentification unique : une seule demande PolicyKit au lancement.
@@ -5330,6 +5380,10 @@ if __name__ == "__main__":
                 sys.exit(0)
 
         app = QApplication(sys.argv)
+        try:
+            app.setWindowIcon(icone_karediag(128))
+        except Exception:
+            pass
         window = KDiskApp()
         window.show()
         sys.exit(app.exec_())
