@@ -5368,6 +5368,43 @@ def icone_karediag(taille=64):
     peintre.end()
     return QIcon(pixmap)
 
+def installer_lanceur_et_icone():
+    """Installe l'icône KareDiag dans le thème hicolor et crée un lanceur
+    « .desktop » utilisateur (~/.local/share/applications) afin que
+    KareDiag apparaisse dans le menu avec son icône, comme un logiciel
+    installé. Sans effet si un problème survient (l'application reste
+    utilisable, l'icône est purement cosmétique)."""
+    if os.geteuid() == 0:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        pixmap = icone_karediag(128).pixmap(128, 128)
+        if pixmap.isNull():
+            return
+        dossier_icone = os.path.expanduser(
+            "~/.local/share/icons/hicolor/128x128/apps")
+        os.makedirs(dossier_icone, exist_ok=True)
+        chemin_icone = os.path.join(dossier_icone, "karediag.png")
+        pixmap.save(chemin_icone, "PNG")
+
+        chemin_script = os.path.abspath(sys.argv[0])
+        dossier_app = os.path.expanduser("~/.local/share/applications")
+        os.makedirs(dossier_app, exist_ok=True)
+        chemin_desktop = os.path.join(dossier_app, "karediag.desktop")
+        with open(chemin_desktop, "w", encoding="utf-8") as f:
+            f.write("[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=KareDiag\n"
+                    "Comment=Maintenance et diagnostic système\n"
+                    f"Exec=python3 \"{chemin_script}\"\n"
+                    f"Icon={chemin_icone}\n"
+                    "Terminal=false\n"
+                    "Categories=System;Utility;\n")
+    except Exception:
+        return
+
 
 if __name__ == "__main__":
     try:
@@ -5384,6 +5421,7 @@ if __name__ == "__main__":
             app.setWindowIcon(icone_karediag(128))
         except Exception:
             pass
+        installer_lanceur_et_icone()
         window = KDiskApp()
         window.show()
         sys.exit(app.exec_())
