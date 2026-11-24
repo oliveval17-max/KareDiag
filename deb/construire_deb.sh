@@ -35,7 +35,9 @@ install -m 644 karediag.py \
 install -m 755 deb/lanceur.sh "$CONSTRUIRE/usr/bin/karediag"
 install -m 644 deb/karediag.desktop \
     "$CONSTRUIRE/usr/share/applications/karediag.desktop"
-install -m 644 README.md "$CONSTRUIRE/usr/share/doc/karediag/README.md"
+if [ -f README.md ]; then
+    install -m 644 README.md "$CONSTRUIRE/usr/share/doc/karediag/README.md"
+fi
 install -m 644 deb/copyright \
     "$CONSTRUIRE/usr/share/doc/karediag/copyright"
 

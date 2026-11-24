@@ -87,11 +87,11 @@ def dessin_pur(taille):
         if 0 <= x < s and 0 <= y < s:
             cible = canevas[y][x]
             ancien = cible[3]
-            nouveau = ancien + a * (1.0 - ancien)
+            nouveau = a + ancien * (1.0 - a)
             if nouveau > 0:
-                cible[0] = (cible[0] * ancien + r * a * (1.0 - ancien)) / nouveau
-                cible[1] = (cible[1] * ancien + v * a * (1.0 - ancien)) / nouveau
-                cible[2] = (cible[2] * ancien + b * a * (1.0 - ancien)) / nouveau
+                cible[0] = (r * a + cible[0] * ancien * (1.0 - a)) / nouveau
+                cible[1] = (v * a + cible[1] * ancien * (1.0 - a)) / nouveau
+                cible[2] = (b * a + cible[2] * ancien * (1.0 - a)) / nouveau
                 cible[3] = nouveau
 
     def regions(x0, y0, x1, y1, test, couleur):
