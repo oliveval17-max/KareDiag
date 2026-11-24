@@ -8,6 +8,7 @@ import shlex
 import shutil
 import glob
 import getpass
+import pwd
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -5372,10 +5373,22 @@ def installer_lanceur_et_icone():
     """Installe l'icône KareDiag dans le thème hicolor et crée un lanceur
     « .desktop » utilisateur (~/.local/share/applications) afin que
     KareDiag apparaisse dans le menu avec son icône, comme un logiciel
-    installé. Sans effet si un problème survient (l'application reste
-    utilisable, l'icône est purement cosmétique)."""
-    if os.geteuid() == 0:
-        return
+    installé. KareDiag tournant généralement via pkexec, l'installation
+    vise l'utilisateur d'origine (PKEXEC_UID) et non root : authentifié
+    comme ses fichiers, changés en conséquence. Sans effet si un problème
+    survient (l'application reste utilisable, l'icône est purement
+    cosmétique)."""
+    uid = os.geteuid()
+    if uid == 0:
+        try:
+            uid = int(os.environ.get("PKEXEC_UID", ""))
+        except ValueError:
+            return
+        base = os.path.expanduser("~")
+        if base in ("", "/root"):
+            return
+    else:
+        base = os.path.expanduser("~")
     app = QApplication.instance()
     if app is None:
         return
@@ -5383,14 +5396,14 @@ def installer_lanceur_et_icone():
         pixmap = icone_karediag(128).pixmap(128, 128)
         if pixmap.isNull():
             return
-        dossier_icone = os.path.expanduser(
-            "~/.local/share/icons/hicolor/128x128/apps")
+        dossier_icone = os.path.join(
+            base, ".local/share/icons/hicolor/128x128/apps")
         os.makedirs(dossier_icone, exist_ok=True)
         chemin_icone = os.path.join(dossier_icone, "karediag.png")
         pixmap.save(chemin_icone, "PNG")
 
         chemin_script = os.path.abspath(sys.argv[0])
-        dossier_app = os.path.expanduser("~/.local/share/applications")
+        dossier_app = os.path.join(base, ".local/share/applications")
         os.makedirs(dossier_app, exist_ok=True)
         chemin_desktop = os.path.join(dossier_app, "karediag.desktop")
         with open(chemin_desktop, "w", encoding="utf-8") as f:
@@ -5402,6 +5415,26 @@ def installer_lanceur_et_icone():
                     f"Icon={chemin_icone}\n"
                     "Terminal=false\n"
                     "Categories=System;Utility;\n")
+
+        if os.geteuid() == 0:
+            gid = pwd.getpwuid(uid).pw_gid
+            for chemin_fichier in (chemin_icone, chemin_desktop):
+                try:
+                    os.chown(chemin_fichier, uid, gid)
+                except Exception:
+                    pass
+            for chemin_cree in (dossier_icone, dossier_app):
+                courant = chemin_cree
+                while courant.startswith(base + os.sep):
+                    try:
+                        if os.stat(courant).st_uid == 0:
+                            os.chown(courant, uid, gid)
+                    except Exception:
+                        pass
+                    parent = os.path.dirname(courant)
+                    if parent == courant:
+                        break
+                    courant = parent
     except Exception:
         return
 
