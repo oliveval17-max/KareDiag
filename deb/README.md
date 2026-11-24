@@ -19,7 +19,7 @@ Le script :
 ## Installer / désinstaller
 
 ```bash
-sudo apt install ./karediag_8.4.0_all.deb
+sudo apt install ./karediag_8.4.1_all.deb
 sudo apt remove karediag
 ```
 

@@ -1,6 +1,6 @@
 # 🩺 KareDiag
 
-**KareDiag V-8.4.0** — Logiciel de maintenance, de diagnostic et de sauvetage de disques pour Linux, en un seul fichier Python (`karediag.py`), interface 100 % française à thème sombre.
+**KareDiag V-8.4.1** — Logiciel de maintenance, de diagnostic et de sauvetage de disques pour Linux, en un seul fichier Python (`karediag.py`), interface 100 % française à thème sombre.
 
 *Conception : oliveval17-max avec Mistral Vibe Code — optimisé pour Kaisen Linux 🇫🇷*
 
@@ -64,7 +64,7 @@ Construisez puis installez le paquet (voir [deb/README.md](deb/README.md)) :
 
 ```bash
 ./deb/construire_deb.sh
-sudo apt install ./karediag_8.4.0_all.deb
+sudo apt install ./karediag_8.4.1_all.deb
 ```
 
 Le paquet installe tout au niveau système (`/usr/bin/karediag`, icône et lanceur partagés).
@@ -136,4 +136,4 @@ Rechargez KareDiag : la Zone 15 remonte températures, ventilateurs et tensions.
 
 ## ✒️ Crédits
 
-KareDiag — **oliveval17-max avec Mistral Vibe Code** : KareDiag V-8.4.0 optimisé pour Kaisen Linux 🇫🇷
+KareDiag — **oliveval17-max avec Mistral Vibe Code** : KareDiag V-8.4.1 optimisé pour Kaisen Linux 🇫🇷
